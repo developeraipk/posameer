@@ -916,6 +916,13 @@ impl DatabaseManager {
             rusqlite::params![now_str, now_str],
         );
 
+        // Ensure default Cash & Settlement account exists for POS & Wholesale payments FK
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO chart_of_accounts (account_id, account_code, account_name, account_type, account_category, normal_balance, parent_account_id, is_active, created_at, updated_at)
+            VALUES ('acc_1010', '1010', 'Cash & Settlement Treasury', 'ASSET', 'CASH', 'DEBIT', NULL, 1, ?, ?);",
+            rusqlite::params![now_str, now_str],
+        );
+
         Ok(())
     }
 
@@ -4714,6 +4721,7 @@ impl DatabaseManager {
 
         // Optional Immediate Payment on Wholesale Invoice
         if payload.paid_amount_paisa > 0 {
+            let (recv_account_id, valid_user_id) = Self::resolve_wholesale_payment_fks(&tx, &payload.received_by_user_id)?;
             let pay_id = format!("wpay_{}", inv_id);
             let p_method = payload.payment_method.clone().unwrap_or_else(|| "CASH".to_string());
             let (db_method, ref_num) = match p_method.as_str() {
@@ -4725,8 +4733,8 @@ impl DatabaseManager {
             if let Err(e) = tx.execute(
                 "INSERT INTO wholesale_payments
                 (wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'acc_1010', 'Wholesale invoice payment at issuance', ?, ?);",
-                rusqlite::params![pay_id, payload.customer_id, inv_id, now, db_method, payload.paid_amount_paisa, ref_num, payload.received_by_user_id, now]
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Wholesale invoice payment at issuance', ?, ?);",
+                rusqlite::params![pay_id, payload.customer_id, inv_id, now, db_method, payload.paid_amount_paisa, ref_num, recv_account_id, valid_user_id, now]
             ) {
                 let fallback_m = match db_method {
                     "EASYPAISA" | "JAZZCASH" => "DIGITAL_WALLET",
@@ -4735,8 +4743,8 @@ impl DatabaseManager {
                 tx.execute(
                     "INSERT INTO wholesale_payments
                     (wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'acc_1010', 'Wholesale invoice payment at issuance', ?, ?);",
-                    rusqlite::params![pay_id, payload.customer_id, inv_id, now, fallback_m, payload.paid_amount_paisa, ref_num, payload.received_by_user_id, now]
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Wholesale invoice payment at issuance', ?, ?);",
+                    rusqlite::params![pay_id, payload.customer_id, inv_id, now, fallback_m, payload.paid_amount_paisa, ref_num, recv_account_id, valid_user_id, now]
                 ).map_err(|e2| format!("Failed to record wholesale payment: {} (fallback: {})", e, e2))?;
             }
 
@@ -4786,6 +4794,55 @@ impl DatabaseManager {
         })
     }
 
+    /// Resolves valid `chart_of_accounts` and `users` foreign keys for wholesale payments, auto-seeding defaults if missing.
+    fn resolve_wholesale_payment_fks(tx: &rusqlite::Transaction, requested_user_id: &str) -> Result<(String, String), String> {
+        let account_id: String = if tx.query_row(
+            "SELECT account_id FROM chart_of_accounts WHERE account_id = 'acc_1010';",
+            [],
+            |r| r.get::<_, String>(0),
+        ).is_ok() {
+            "acc_1010".to_string()
+        } else if let Ok(existing_acc) = tx.query_row(
+            "SELECT account_id FROM chart_of_accounts WHERE is_active = 1 ORDER BY CASE WHEN account_category = 'CASH' THEN 0 WHEN account_type = 'ASSET' THEN 1 ELSE 2 END, account_id ASC LIMIT 1;",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            existing_acc
+        } else {
+            let now_coa = chrono::Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT OR IGNORE INTO chart_of_accounts (account_id, account_code, account_name, account_type, account_category, normal_balance, parent_account_id, is_active, created_at, updated_at)
+                 VALUES ('acc_1010', '1010', 'Cash & Settlement Treasury', 'ASSET', 'CASH', 'DEBIT', NULL, 1, ?, ?);",
+                rusqlite::params![now_coa, now_coa],
+            ).map_err(|e| format!("Failed to seed default cash account in chart_of_accounts: {}", e))?;
+            "acc_1010".to_string()
+        };
+
+        let req_user = requested_user_id.trim();
+        let valid_user_id: String = if !req_user.is_empty() && tx.query_row(
+            "SELECT user_id FROM users WHERE user_id = ?;",
+            [req_user],
+            |r| r.get::<_, String>(0),
+        ).is_ok() {
+            req_user.to_string()
+        } else if let Ok(fallback_user) = tx.query_row(
+            "SELECT user_id FROM users ORDER BY CASE WHEN is_active = 1 THEN 0 ELSE 1 END, CASE WHEN role = 'SUPER_ADMIN' THEN 0 ELSE 1 END, user_id ASC LIMIT 1;",
+            [],
+            |r| r.get::<_, String>(0),
+        ) {
+            fallback_user
+        } else {
+            let _ = Self::ensure_default_users(tx);
+            tx.query_row(
+                "SELECT user_id FROM users LIMIT 1;",
+                [],
+                |r| r.get::<_, String>(0),
+            ).map_err(|e| format!("No valid user found in users table to record payment: {}", e))?
+        };
+
+        Ok((account_id, valid_user_id))
+    }
+
     pub fn record_wholesale_payment(&self, payload: &RecordWholesalePaymentPayload) -> Result<bool, String> {
         let mut conn = self.get_connection().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -4795,6 +4852,25 @@ impl DatabaseManager {
             [&payload.customer_id],
             |r| r.get(0)
         ).map_err(|e| format!("Customer not found: {}", e))?;
+
+        let (recv_account_id, valid_user_id) = Self::resolve_wholesale_payment_fks(&tx, &payload.received_by_user_id)?;
+        let specific_inv = payload
+            .wholesale_invoice_id
+            .as_ref()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty());
+
+        let specific_inv_data: Option<(i64, i64)> = if let Some(ref inv_id) = specific_inv {
+            Some(
+                tx.query_row(
+                    "SELECT paid_amount_paisa, net_total_paisa FROM wholesale_invoices WHERE wholesale_invoice_id = ?;",
+                    [inv_id],
+                    |r| Ok((r.get(0)?, r.get(1)?))
+                ).map_err(|e| format!("Wholesale invoice not found: {}", e))?
+            )
+        } else {
+            None
+        };
 
         let now = chrono::Utc::now().to_rfc3339();
         let pay_id = format!("wpay_{}", chrono::Utc::now().timestamp_millis());
@@ -4808,17 +4884,18 @@ impl DatabaseManager {
         if let Err(e) = tx.execute(
             "INSERT INTO wholesale_payments
             (wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'acc_1010', ?, ?, ?);",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             rusqlite::params![
                 pay_id,
                 payload.customer_id,
-                payload.wholesale_invoice_id,
+                specific_inv,
                 now,
                 db_payment_method,
                 payload.amount_paid_paisa,
                 final_ref,
+                recv_account_id,
                 payload.notes,
-                payload.received_by_user_id,
+                valid_user_id,
                 now
             ]
         ) {
@@ -4834,17 +4911,18 @@ impl DatabaseManager {
             tx.execute(
                 "INSERT INTO wholesale_payments
                 (wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'acc_1010', ?, ?, ?);",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                 rusqlite::params![
                     pay_id,
                     payload.customer_id,
-                    payload.wholesale_invoice_id,
+                    specific_inv,
                     now,
                     fallback_method,
                     payload.amount_paid_paisa,
                     fallback_ref,
+                    recv_account_id,
                     payload.notes,
-                    payload.received_by_user_id,
+                    valid_user_id,
                     now
                 ]
             ).map_err(|e2| format!("Failed to record wholesale payment: {} (fallback: {})", e, e2))?;
@@ -4852,15 +4930,8 @@ impl DatabaseManager {
 
         // Update specific invoice if provided, otherwise apply payment across oldest unpaid invoices FIFO
         let mut remaining_payment = payload.amount_paid_paisa;
-        let specific_inv = payload.wholesale_invoice_id.as_ref().filter(|id| !id.trim().is_empty());
 
-        if let Some(inv_id) = specific_inv {
-            let (paid, net): (i64, i64) = tx.query_row(
-                "SELECT paid_amount_paisa, net_total_paisa FROM wholesale_invoices WHERE wholesale_invoice_id = ?;",
-                [inv_id],
-                |r| Ok((r.get(0)?, r.get(1)?))
-            ).map_err(|e| format!("Wholesale invoice not found: {}", e))?;
-
+        if let (Some(inv_id), Some((paid, net))) = (specific_inv.as_ref(), specific_inv_data) {
             let new_paid = paid + payload.amount_paid_paisa;
             let new_balance_due = net - new_paid;
             let p_status = if new_balance_due <= 0 { "PAID" } else { "PARTIALLY_PAID" };
@@ -6821,75 +6892,179 @@ impl DatabaseManager {
     // MODULE 11: EXECUTIVE BI & INVENTORY VALUATION
     // ========================================================================
 
+    /// Normalizes both timezone-aware RFC3339 timestamps (`Z` / `+00:00` / `+05:00`)
+    /// and naive PKT local strings (`YYYY-MM-DD HH:MM:SS`) into PKT date `YYYY-MM-DD`
+    /// without double-shifting naive local timestamps by +5 hours.
+    fn pkt_date_sql(col: &str) -> String {
+        format!(
+            "(CASE WHEN ({c} GLOB '*[+-][0-9][0-9]:[0-9][0-9]' OR {c} LIKE '%Z') \
+             THEN date({c}, '+5 hours') \
+             ELSE date(substr(replace({c}, 'T', ' '), 1, 19)) END)",
+            c = col
+        )
+    }
+
+    /// Allocates online order discounts strictly from the highest-priced item downward while honoring stored item discounts.
+    fn allocate_online_item_discounts(
+        items: &[serde_json::Value],
+        o_delivery: i64,
+        o_discount: i64,
+        o_total: i64,
+        o_refund: i64,
+        o_deduct: i64,
+        d_status: &str,
+    ) -> Vec<(i64, i64)> {
+        let mut raw_totals: Vec<i64> = Vec::with_capacity(items.len());
+        let mut item_discs: Vec<i64> = Vec::with_capacity(items.len());
+        let mut active_flags: Vec<bool> = Vec::with_capacity(items.len());
+
+        for it in items {
+            let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(1);
+            let unit_p = it
+                .get("unit_price_paisa")
+                .and_then(|u| u.as_i64())
+                .unwrap_or_else(|| it.get("line_total_paisa").and_then(|l| l.as_i64()).unwrap_or(0) / qty);
+            let lt_val = it.get("line_total_paisa").and_then(|l| l.as_i64()).unwrap_or(0);
+            let raw_lt = if unit_p > 0 { unit_p * qty } else { lt_val }.max(0);
+            let stored_disc = it
+                .get("discount_paisa")
+                .and_then(|d| d.as_i64())
+                .unwrap_or(0)
+                .max(0)
+                .min(raw_lt);
+            let ret_qty = it.get("returned_quantity").and_then(|v| v.as_i64()).unwrap_or(0);
+            raw_totals.push(raw_lt);
+            item_discs.push(stored_disc);
+            active_flags.push(qty > ret_qty);
+        }
+
+        let explicit_sum: i64 = item_discs.iter().sum();
+        let raw_sum: i64 = raw_totals.iter().sum();
+
+        let mut remaining_extra = if explicit_sum > 0 {
+            (o_discount - explicit_sum).max(0)
+        } else if o_discount > 0 {
+            o_discount
+        } else if d_status != "PARTIAL_RETURN" && (raw_sum + o_delivery) > (o_total + o_refund + o_deduct) {
+            (raw_sum + o_delivery - o_total).max(0)
+        } else {
+            0
+        };
+
+        if remaining_extra > 0 {
+            let mut order: Vec<usize> = (0..items.len()).collect();
+            order.sort_by(|&a, &b| {
+                raw_totals[b]
+                    .cmp(&raw_totals[a])
+                    .then_with(|| active_flags[b].cmp(&active_flags[a]))
+            });
+            for idx in order {
+                if remaining_extra <= 0 {
+                    break;
+                }
+                let headroom = (raw_totals[idx] - item_discs[idx]).max(0);
+                let add = remaining_extra.min(headroom);
+                item_discs[idx] += add;
+                remaining_extra -= add;
+            }
+        }
+
+        raw_totals.into_iter().zip(item_discs.into_iter()).collect()
+    }
+
+    /// Computes exact net returned/RTO value for an online order, handling COD partial returns cleanly.
+    fn calc_online_order_return_total(
+        items_json: &str,
+        p_status: &str,
+        d_status: &str,
+        o_delivery: i64,
+        o_discount: i64,
+        o_total: i64,
+        o_refund: i64,
+        o_deduct: i64,
+    ) -> i64 {
+        let is_full_order_return =
+            (p_status == "RETURNED" || d_status == "RETURNED_RTO" || d_status == "RETURNED")
+                && d_status != "PARTIAL_RETURN";
+
+        let mut items_ret_net = 0i64;
+        if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(items_json) {
+            let allocs = Self::allocate_online_item_discounts(
+                &parsed,
+                o_delivery,
+                o_discount,
+                o_total,
+                o_refund,
+                o_deduct,
+                d_status,
+            );
+            for (idx, it) in parsed.iter().enumerate() {
+                let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(1);
+                let ret_qty = it.get("returned_quantity").and_then(|v| v.as_i64()).unwrap_or(0);
+                let item_status = it.get("return_status").and_then(|v| v.as_str()).unwrap_or("ACTIVE");
+                let is_it_ret = ret_qty > 0
+                    || item_status == "RETURNED"
+                    || item_status == "PARTIAL_RETURN"
+                    || is_full_order_return;
+                if !is_it_ret {
+                    continue;
+                }
+                let ret_units = if ret_qty > 0 { ret_qty.min(qty) } else { qty };
+                let (raw_lt, item_disc) = allocs[idx];
+                let net_lt = (raw_lt - item_disc).max(0);
+                items_ret_net += ((net_lt as f64) * (ret_units as f64 / qty as f64)).round() as i64;
+            }
+        }
+
+        if o_refund > 0 {
+            if o_deduct > 0 {
+                o_refund
+            } else if items_ret_net > 0 {
+                o_refund.max(items_ret_net)
+            } else {
+                o_refund
+            }
+        } else if items_ret_net > 0 {
+            (items_ret_net - o_deduct.max(0)).max(0)
+        } else {
+            (o_total - o_deduct.max(0)).max(0)
+        }
+    }
+
+    fn pkt_period_cond(col: &str, period_type: &str) -> String {
+        let d = Self::pkt_date_sql(col);
+        match period_type {
+            "weekly" => format!("({} >= date('now', '+5 hours', '-6 days') AND {} <= date('now', '+5 hours'))", d, d),
+            "monthly" => format!("strftime('%Y-%m', {}) = strftime('%Y-%m', 'now', '+5 hours')", d),
+            "yearly" => format!("strftime('%Y', {}) = strftime('%Y', 'now', '+5 hours')", d),
+            "all" => "1=1".to_string(),
+            _ => format!("{} = date('now', '+5 hours')", d),
+        }
+    }
+
     pub fn get_executive_dashboard(&self, period: Option<String>) -> Result<ExecutiveDashboardDto, String> {
         let conn = self.get_connection().map_err(|e| e.to_string())?;
 
         let period_type = period.as_deref().unwrap_or("today").to_lowercase();
-        let (inv_cond_no_alias, inv_cond_si, ret_cond_no_alias, ret_cond_rv, wi_cond_wi, sal_cond, exp_cond, wp_cond_wp) = match period_type.as_str() {
-            "weekly" => (
-                "date(invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(si.invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(return_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(rv.return_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(wi.invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(COALESCE(payout_date, created_at), '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(expense_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-                "date(wp.payment_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
-            ),
-            "monthly" => (
-                "strftime('%Y-%m', invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', si.invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', return_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', rv.return_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', wi.invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', COALESCE(payout_date, created_at), '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', expense_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-                "strftime('%Y-%m', wp.payment_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
-            ),
-            "yearly" => (
-                "strftime('%Y', invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', si.invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', return_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', rv.return_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', wi.invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', COALESCE(payout_date, created_at), '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', expense_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-                "strftime('%Y', wp.payment_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
-            ),
-            "all" => (
-                "1=1",
-                "1=1",
-                "1=1",
-                "1=1",
-                "1=1",
-                "1=1",
-                "1=1",
-                "1=1",
-            ),
-            _ => (
-                "(date(invoice_date, '+5 hours') = date('now', '+5 hours') OR date(invoice_date) = date('now', '+5 hours') OR date(invoice_date, 'localtime') = date('now', 'localtime'))",
-                "(date(si.invoice_date, '+5 hours') = date('now', '+5 hours') OR date(si.invoice_date) = date('now', '+5 hours') OR date(si.invoice_date, 'localtime') = date('now', 'localtime'))",
-                "(date(return_date, '+5 hours') = date('now', '+5 hours') OR date(return_date) = date('now', '+5 hours') OR date(return_date, 'localtime') = date('now', 'localtime'))",
-                "(date(rv.return_date, '+5 hours') = date('now', '+5 hours') OR date(rv.return_date) = date('now', '+5 hours') OR date(rv.return_date, 'localtime') = date('now', 'localtime'))",
-                "(date(wi.invoice_date, '+5 hours') = date('now', '+5 hours') OR date(wi.invoice_date) = date('now', '+5 hours') OR date(wi.invoice_date, 'localtime') = date('now', 'localtime'))",
-                "(date(COALESCE(payout_date, created_at), '+5 hours') = date('now', '+5 hours') OR date(COALESCE(payout_date, created_at)) = date('now', '+5 hours') OR date(COALESCE(payout_date, created_at), 'localtime') = date('now', 'localtime'))",
-                "(date(expense_date, '+5 hours') = date('now', '+5 hours') OR date(expense_date) = date('now', '+5 hours') OR date(expense_date, 'localtime') = date('now', 'localtime'))",
-                "(date(wp.payment_date, '+5 hours') = date('now', '+5 hours') OR date(wp.payment_date) = date('now', '+5 hours') OR date(wp.payment_date, 'localtime') = date('now', 'localtime'))",
-            ),
-        };
+        let pt = period_type.as_str();
+        let inv_cond_no_alias = Self::pkt_period_cond("invoice_date", pt);
+        let inv_cond_si = Self::pkt_period_cond("si.invoice_date", pt);
+        let ret_cond_no_alias = Self::pkt_period_cond("return_date", pt);
+        let ret_cond_rv = Self::pkt_period_cond("rv.return_date", pt);
+        let wi_cond_wi = Self::pkt_period_cond("wi.invoice_date", pt);
+        let sal_cond = Self::pkt_period_cond("COALESCE(payout_date, created_at)", pt);
+        let exp_cond = Self::pkt_period_cond("expense_date", pt);
+        let wp_cond_wp = Self::pkt_period_cond("wp.payment_date", pt);
 
-        let onl_cond = match period_type.as_str() {
-            "weekly" => "(date(created_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR date(created_at) >= date('now', '-7 days'))",
-            "monthly" => "(strftime('%Y-%m', created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now'))",
-            "yearly" => "(strftime('%Y', created_at, '+5 hours') = strftime('%Y', 'now', '+5 hours') OR strftime('%Y', created_at) = strftime('%Y', 'now'))",
-            _ => "(date(created_at, '+5 hours') = date('now', '+5 hours') OR date(created_at) = date('now', '+5 hours') OR date(created_at, 'localtime') = date('now', 'localtime'))",
-        };
-
-        let onl_ret_cond = match period_type.as_str() {
-            "weekly" => "(date(created_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR (collected_at IS NOT NULL AND (date(collected_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR date(collected_at) >= date('now', '-7 days'))))",
-            "monthly" => "(strftime('%Y-%m', created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR (collected_at IS NOT NULL AND strftime('%Y-%m', collected_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')))",
-            "yearly" => "(strftime('%Y', created_at, '+5 hours') = strftime('%Y', 'now', '+5 hours') OR (collected_at IS NOT NULL AND strftime('%Y', collected_at, '+5 hours') = strftime('%Y', 'now', '+5 hours')))",
-            _ => "((date(created_at, '+5 hours') = date('now', '+5 hours') OR date(created_at) = date('now', '+5 hours') OR date(created_at, 'localtime') = date('now', 'localtime')) OR (collected_at IS NOT NULL AND (date(collected_at, '+5 hours') = date('now', '+5 hours') OR date(collected_at) = date('now', '+5 hours') OR date(collected_at, 'localtime') = date('now', 'localtime'))))",
+        let onl_cond = Self::pkt_period_cond("created_at", pt);
+        let onl_ret_cond = if pt == "all" {
+            "1=1".to_string()
+        } else {
+            format!(
+                "({} OR (collected_at IS NOT NULL AND {}))",
+                Self::pkt_period_cond("created_at", pt),
+                Self::pkt_period_cond("collected_at", pt)
+            )
         };
 
         // 0. Returns & refunds for the selected period (Retail POS + Online Orders Return / RTO)
@@ -6904,22 +7079,33 @@ impl DatabaseManager {
             |r| Ok((r.get(0)?, r.get(1)?))
         ).unwrap_or((0, 0));
 
-        let (online_period_refunds, online_period_returns_count): (i64, i64) = conn.query_row(
-            &format!(
-                "SELECT 
-                    COALESCE(SUM(CASE 
-                        WHEN refund_amount_paisa IS NOT NULL AND refund_amount_paisa > 0 THEN refund_amount_paisa 
-                        ELSE MAX(0, total_amount_paisa - COALESCE(deduction_amount_paisa, 0)) 
-                    END), 0),
-                    COUNT(*)
-                 FROM online_orders
-                 WHERE (payment_status = 'RETURNED' OR delivery_status = 'RETURNED_RTO' OR delivery_status = 'RETURNED' OR delivery_status = 'PARTIAL_RETURN' OR (refund_amount_paisa IS NOT NULL AND refund_amount_paisa > 0))
-                   AND {};",
-                onl_ret_cond
-            ),
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?))
-        ).unwrap_or((0, 0));
+        let mut online_period_refunds = 0i64;
+        let mut online_period_returns_count = 0i64;
+        if let Ok(mut stmt) = conn.prepare(&format!(
+            "SELECT items_json, payment_status, delivery_status, COALESCE(delivery_charges_paisa, 0), COALESCE(discount_paisa, 0), total_amount_paisa, COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0)
+             FROM online_orders
+             WHERE (payment_status = 'RETURNED' OR delivery_status = 'RETURNED_RTO' OR delivery_status = 'RETURNED' OR delivery_status = 'PARTIAL_RETURN' OR (refund_amount_paisa IS NOT NULL AND refund_amount_paisa > 0))
+               AND {};",
+            onl_ret_cond
+        )) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                    r.get::<_, i64>(3).unwrap_or(0),
+                    r.get::<_, i64>(4).unwrap_or(0),
+                    r.get::<_, i64>(5).unwrap_or(0),
+                    r.get::<_, i64>(6).unwrap_or(0),
+                    r.get::<_, i64>(7).unwrap_or(0),
+                ))
+            }) {
+                for (ij, ps, ds, deliv, disc, tot, ref_a, ded_a) in rows.flatten() {
+                    online_period_returns_count += 1;
+                    online_period_refunds += Self::calc_online_order_return_total(&ij, &ps, &ds, deliv, disc, tot, ref_a, ded_a);
+                }
+            }
+        }
 
         let period_refunds = retail_period_refunds + online_period_refunds;
         let period_returns_count = retail_period_returns_count + online_period_returns_count;
@@ -6933,19 +7119,32 @@ impl DatabaseManager {
             |r| Ok((r.get(0)?, r.get(1)?))
         ).unwrap_or((0, 0));
 
-        let (online_mtd_refunds, online_mtd_returns_count): (i64, i64) = conn.query_row(
-            "SELECT 
-                COALESCE(SUM(CASE 
-                    WHEN refund_amount_paisa IS NOT NULL AND refund_amount_paisa > 0 THEN refund_amount_paisa 
-                    ELSE MAX(0, total_amount_paisa - COALESCE(deduction_amount_paisa, 0)) 
-                END), 0),
-                COUNT(*)
+        let mut online_mtd_refunds = 0i64;
+        let mut online_mtd_returns_count = 0i64;
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT items_json, payment_status, delivery_status, COALESCE(delivery_charges_paisa, 0), COALESCE(discount_paisa, 0), total_amount_paisa, COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0)
              FROM online_orders
              WHERE (payment_status = 'RETURNED' OR delivery_status = 'RETURNED_RTO' OR delivery_status = 'RETURNED' OR delivery_status = 'PARTIAL_RETURN' OR (refund_amount_paisa IS NOT NULL AND refund_amount_paisa > 0))
-               AND (strftime('%Y-%m', created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR (collected_at IS NOT NULL AND strftime('%Y-%m', collected_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')));",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?))
-        ).unwrap_or((0, 0));
+               AND (strftime('%Y-%m', created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR (collected_at IS NOT NULL AND strftime('%Y-%m', collected_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')));"
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0).unwrap_or_default(),
+                    r.get::<_, String>(1).unwrap_or_default(),
+                    r.get::<_, String>(2).unwrap_or_default(),
+                    r.get::<_, i64>(3).unwrap_or(0),
+                    r.get::<_, i64>(4).unwrap_or(0),
+                    r.get::<_, i64>(5).unwrap_or(0),
+                    r.get::<_, i64>(6).unwrap_or(0),
+                    r.get::<_, i64>(7).unwrap_or(0),
+                ))
+            }) {
+                for (ij, ps, ds, deliv, disc, tot, ref_a, ded_a) in rows.flatten() {
+                    online_mtd_returns_count += 1;
+                    online_mtd_refunds += Self::calc_online_order_return_total(&ij, &ps, &ds, deliv, disc, tot, ref_a, ded_a);
+                }
+            }
+        }
 
         let mtd_refunds = retail_mtd_refunds + online_mtd_refunds;
         let mtd_returns_count = retail_mtd_returns_count + online_mtd_returns_count;
@@ -7005,10 +7204,10 @@ impl DatabaseManager {
         ).unwrap_or((0, 0, 0, 0, 0));
 
         let mut period_gross = retail_gross + wholesale_gross + online_gross;
-        let period_discount = retail_discount + wholesale_discount + online_discount;
+        let mut period_discount = retail_discount + wholesale_discount + online_discount;
         let _period_net_raw = retail_net_raw + wholesale_net_raw + online_net_raw;
         let period_orders = retail_orders + wholesale_orders + online_orders_cnt;
-        let period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders;
+        let mut period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders;
 
         // Net sales after customer return refunds (Gross remains intact; Net = Gross - Discounts - Returns)
         let final_net_sales;
@@ -7102,7 +7301,7 @@ impl DatabaseManager {
         let tester_clean_ret_units = (tester_ret_units - tester_damaged_ret_units).max(0);
 
         let mut onl_items_stmt = conn.prepare(&format!(
-            "SELECT items_json, payment_status, delivery_status, subtotal_paisa, total_amount_paisa, COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0) FROM online_orders WHERE delivery_status != 'CANCELLED' AND {};",
+            "SELECT items_json, payment_status, delivery_status, subtotal_paisa, total_amount_paisa, COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0), COALESCE(delivery_charges_paisa, 0), COALESCE(discount_paisa, 0) FROM online_orders WHERE delivery_status != 'CANCELLED' AND {};",
             onl_cond
         )).ok();
 
@@ -7116,6 +7315,16 @@ impl DatabaseManager {
         let mut online_perfume_gross = 0i64;
         let mut online_attar_gross = 0i64;
         let mut online_tester_gross = 0i64;
+
+        let mut online_perfume_disc = 0i64;
+        let mut online_perfume_disc_u = 0i64;
+        let mut online_attar_disc = 0i64;
+        let mut online_attar_disc_u = 0i64;
+        let mut online_tester_disc = 0i64;
+        let mut online_tester_disc_u = 0i64;
+        let mut online_items_gross_plus_deliv = 0i64;
+        let mut online_items_disc_total = 0i64;
+        let mut online_items_disc_orders_cnt = 0i64;
 
         let mut promotional_offers_spec: std::collections::HashMap<String, Vec<serde_json::Value>> = std::collections::HashMap::new();
         if let Ok(mut off_stmt) = conn.prepare("SELECT title, items_json FROM promotional_offers;") {
@@ -7154,71 +7363,42 @@ impl DatabaseManager {
                     r.get::<_, i64>(4).unwrap_or(0),
                     r.get::<_, i64>(5).unwrap_or(0),
                     r.get::<_, i64>(6).unwrap_or(0),
+                    r.get::<_, i64>(7).unwrap_or(0),
+                    r.get::<_, i64>(8).unwrap_or(0),
                 ))
             }) {
-                for (json_str, p_status, d_status, o_subtotal, o_total, o_refund, o_deduct) in rows.flatten() {
+                for (json_str, p_status, d_status, o_subtotal, o_total, o_refund, o_deduct, o_delivery, o_discount) in rows.flatten() {
                     let is_full_order_return = (p_status == "RETURNED" || d_status == "RETURNED_RTO" || d_status == "RETURNED") && d_status != "PARTIAL_RETURN";
-                    let actual_order_refund_paisa = if o_refund > 0 {
-                        o_refund
-                    } else if o_total > 0 && is_full_order_return {
-                        (o_total - o_deduct).max(0)
-                    } else {
-                        0
-                    };
 
                     if let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
-                        let any_item_has_disc = parsed.iter().any(|it| it.get("discount_paisa").and_then(|d| d.as_i64()).unwrap_or(0) > 0);
-                        let max_ltotal_idx = if !any_item_has_disc && o_subtotal > o_total {
-                            parsed.iter().enumerate().max_by_key(|(_, it)| it.get("line_total_paisa").and_then(|l| l.as_i64()).unwrap_or(0)).map(|(i, _)| i)
-                        } else {
-                            None
-                        };
-                        let legacy_order_discount = if !any_item_has_disc && o_subtotal > o_total {
-                            (o_subtotal - o_total).max(0)
-                        } else {
-                            0
-                        };
+                        let allocations = Self::allocate_online_item_discounts(
+                            &parsed,
+                            o_delivery,
+                            o_discount,
+                            o_total,
+                            o_refund,
+                            o_deduct,
+                            &d_status,
+                        );
+                        let mut order_raw_sum = 0i64;
+                        let mut order_disc_sum = 0i64;
 
-                        // First pass: identify returned items, their exact returned units, and compute total returned items value
-                        let mut ret_items_meta = Vec::new();
-                        let mut total_ret_val_paisa = 0i64;
-
-                        for it in &parsed {
+                        for (idx, it) in parsed.iter().enumerate() {
                             let item_ret_qty = it.get("returned_quantity").and_then(|v| v.as_i64()).unwrap_or(0);
                             let item_status = it.get("return_status").and_then(|v| v.as_str()).unwrap_or("ACTIVE");
-                            let ordered_qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
+                            let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(1);
 
-                            let is_it_ret = if item_ret_qty > 0 || item_status == "RETURNED" || item_status == "PARTIAL_RETURN" {
-                                true
-                            } else if is_full_order_return {
-                                true
-                            } else {
-                                false
-                            };
-
+                            let is_it_ret = item_ret_qty > 0
+                                || item_status == "RETURNED"
+                                || item_status == "PARTIAL_RETURN"
+                                || is_full_order_return;
                             let ret_units = if item_ret_qty > 0 {
-                                item_ret_qty
+                                item_ret_qty.min(qty)
                             } else if is_it_ret {
-                                ordered_qty
+                                qty
                             } else {
                                 0
                             };
-
-                            let unit_p = it.get("unit_price_paisa").and_then(|p| p.as_i64()).unwrap_or_else(|| {
-                                let lt = it.get("line_total_paisa").and_then(|l| l.as_i64()).unwrap_or(0);
-                                (lt / ordered_qty.max(1)).max(0)
-                            });
-
-                            let ret_val = ret_units * unit_p;
-                            if is_it_ret && ret_units > 0 {
-                                total_ret_val_paisa += ret_val;
-                            }
-                            ret_items_meta.push((is_it_ret, ret_units, ret_val));
-                        }
-
-                        // Second pass: process each item
-                        for (idx, it) in parsed.iter().enumerate() {
-                            let (is_it_ret, ret_units, ret_val) = ret_items_meta[idx];
 
                             let itype = it.get("item_type").and_then(|v| v.as_str())
                                 .or_else(|| if it.get("attar_id").is_some() { Some("ATTAR") } else if it.get("product_id").is_some() { Some("PERFUME") } else { None })
@@ -7226,28 +7406,30 @@ impl DatabaseManager {
                             let pname = it.get("name").and_then(|v| v.as_str())
                                 .or_else(|| it.get("product_name").and_then(|v| v.as_str()))
                                 .unwrap_or("Fragrance");
-                            let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
-                            let raw_ltotal = it.get("line_total_paisa").and_then(|l| l.as_i64()).unwrap_or(0);
 
-                            let item_disc = if any_item_has_disc {
-                                it.get("discount_paisa").and_then(|d| d.as_i64()).unwrap_or(0)
-                            } else if Some(idx) == max_ltotal_idx {
-                                legacy_order_discount
+                            let (raw_ltotal, item_disc) = allocations[idx];
+                            let ltotal = (raw_ltotal - item_disc).max(0);
+                            order_raw_sum += raw_ltotal;
+                            order_disc_sum += item_disc;
+
+                            let explicit_item_refund = it
+                                .get("refund_paisa")
+                                .and_then(|p| p.as_i64())
+                                .filter(|&p| p > 0);
+                            let item_net_for_ret = if is_it_ret && ret_units > 0 {
+                                ((ltotal as f64) * (ret_units as f64 / qty as f64)).round() as i64
                             } else {
                                 0
                             };
-                            let ltotal = (raw_ltotal - item_disc).max(0);
-
-                            let explicit_item_refund = it.get("refund_paisa").and_then(|p| p.as_i64());
                             let refund_line_paisa = if is_it_ret && ret_units > 0 {
-                                if let Some(exp_ref) = explicit_item_refund {
-                                    exp_ref
-                                } else if actual_order_refund_paisa > 0 && total_ret_val_paisa > 0 {
-                                    (actual_order_refund_paisa as f64 * (ret_val as f64 / total_ret_val_paisa as f64)).round() as i64
-                                } else if actual_order_refund_paisa > 0 {
-                                    actual_order_refund_paisa
+                                if o_deduct > 0 {
+                                    if let Some(exp_ref) = explicit_item_refund {
+                                        exp_ref.min(item_net_for_ret)
+                                    } else {
+                                        item_net_for_ret
+                                    }
                                 } else {
-                                    ltotal
+                                    item_net_for_ret
                                 }
                             } else {
                                 0
@@ -7266,32 +7448,48 @@ impl DatabaseManager {
                             };
 
                             if let Some(components) = matched_offer_components {
+                                let mut comp_raws: Vec<i64> = Vec::with_capacity(components.len());
                                 let mut comp_regular_total = 0i64;
                                 for c in components {
-                                    let cq = c.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
+                                    let cq = c.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(1) * qty;
                                     let cp = c.get("unit_regular_price").and_then(|p| p.as_i64()).unwrap_or(0) * 100;
-                                    comp_regular_total += cp * cq;
+                                    let c_raw = cp * cq;
+                                    comp_regular_total += c_raw;
+                                    comp_raws.push(c_raw);
                                 }
                                 if comp_regular_total <= 0 {
                                     comp_regular_total = raw_ltotal.max(1);
                                 }
 
-                                let comp_max_idx = components.iter().enumerate().max_by_key(|(_, c)| {
-                                    let cq = c.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
-                                    let cp = c.get("unit_regular_price").and_then(|p| p.as_i64()).unwrap_or(0) * 100;
-                                    cp * cq
-                                }).map(|(i, _)| i);
-                                let comp_discount = (comp_regular_total - ltotal).max(0);
+                                // Deduct offer bundle savings strictly from highest-priced component downward
+                                let mut rem_comp_disc = (comp_regular_total - ltotal).max(0);
+                                let mut comp_discs = vec![0i64; components.len()];
+                                let mut comp_order: Vec<usize> = (0..components.len()).collect();
+                                comp_order.sort_by(|&a, &b| comp_raws[b].cmp(&comp_raws[a]));
+                                for ci in comp_order {
+                                    if rem_comp_disc <= 0 {
+                                        break;
+                                    }
+                                    let d = rem_comp_disc.min(comp_raws[ci]);
+                                    comp_discs[ci] = d;
+                                    rem_comp_disc -= d;
+                                }
 
                                 for (c_idx, c) in components.iter().enumerate() {
                                     let ctype = c.get("item_type").and_then(|v| v.as_str()).unwrap_or("PERFUME");
                                     let cname = c.get("name").and_then(|v| v.as_str()).unwrap_or("Fragrance Component");
-                                    let cq = c.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1) * qty;
-                                    let cp = c.get("unit_regular_price").and_then(|p| p.as_i64()).unwrap_or(0) * 100;
-                                    let c_reg_line = cp * cq;
-                                    let c_raw = c_reg_line;
-                                    let c_disc = if Some(c_idx) == comp_max_idx { comp_discount } else { 0 };
+                                    let c_single_q = c.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(1);
+                                    let cq = c_single_q * qty;
+                                    let c_raw = comp_raws[c_idx];
+                                    let c_disc = comp_discs[c_idx];
                                     let c_ltotal = (c_raw - c_disc).max(0);
+
+                                    let c_ret_units = if is_it_ret && ret_units > 0 { c_single_q * ret_units } else { 0 };
+                                    let c_ret_val = if c_ret_units > 0 {
+                                        ((c_ltotal as f64) * (ret_units as f64 / qty as f64)).round() as i64
+                                    } else {
+                                        0
+                                    };
 
                                     let is_c_tester = ctype == "TESTER" || cname.to_lowercase().contains("tester") || cname.to_lowercase().contains("sample");
                                     let is_c_attar = ctype == "ATTAR" && !is_c_tester;
@@ -7300,14 +7498,56 @@ impl DatabaseManager {
                                         online_tester_gross += c_raw;
                                         online_tester_sales += c_ltotal;
                                         online_tester_units += cq;
+                                        if c_disc > 0 {
+                                            online_tester_disc += c_disc;
+                                            online_tester_disc_u += cq;
+                                        }
+                                        if c_ret_units > 0 {
+                                            online_tester_ret_refunds += c_ret_val;
+                                            online_tester_ret_units += c_ret_units;
+                                            online_returned_items.push(OnlineReturnedItemInfo {
+                                                product_name: cname.to_string(),
+                                                item_type: "TESTER".to_string(),
+                                                quantity: c_ret_units,
+                                                line_total_paisa: c_ret_val,
+                                            });
+                                        }
                                     } else if is_c_attar {
                                         online_attar_gross += c_raw;
                                         online_attar_sales += c_ltotal;
                                         online_attar_units += cq;
+                                        if c_disc > 0 {
+                                            online_attar_disc += c_disc;
+                                            online_attar_disc_u += cq;
+                                        }
+                                        if c_ret_units > 0 {
+                                            online_attar_ret_refunds += c_ret_val;
+                                            online_attar_ret_units += c_ret_units;
+                                            online_returned_items.push(OnlineReturnedItemInfo {
+                                                product_name: cname.to_string(),
+                                                item_type: "ATTAR".to_string(),
+                                                quantity: c_ret_units,
+                                                line_total_paisa: c_ret_val,
+                                            });
+                                        }
                                     } else {
                                         online_perfume_gross += c_raw;
                                         online_perfume_sales += c_ltotal;
                                         online_perfume_units += cq;
+                                        if c_disc > 0 {
+                                            online_perfume_disc += c_disc;
+                                            online_perfume_disc_u += cq;
+                                        }
+                                        if c_ret_units > 0 {
+                                            online_perfume_ret_refunds += c_ret_val;
+                                            online_perfume_ret_units += c_ret_units;
+                                            online_returned_items.push(OnlineReturnedItemInfo {
+                                                product_name: cname.to_string(),
+                                                item_type: "PERFUME".to_string(),
+                                                quantity: c_ret_units,
+                                                line_total_paisa: c_ret_val,
+                                            });
+                                        }
                                     }
                                 }
                             } else {
@@ -7318,6 +7558,10 @@ impl DatabaseManager {
                                     online_tester_gross += raw_ltotal;
                                     online_tester_sales += ltotal;
                                     online_tester_units += qty;
+                                    if item_disc > 0 {
+                                        online_tester_disc += item_disc;
+                                        online_tester_disc_u += qty;
+                                    }
                                     if is_it_ret && ret_units > 0 {
                                         online_tester_ret_refunds += refund_line_paisa;
                                         online_tester_ret_units += ret_units;
@@ -7332,6 +7576,10 @@ impl DatabaseManager {
                                     online_attar_gross += raw_ltotal;
                                     online_attar_sales += ltotal;
                                     online_attar_units += qty;
+                                    if item_disc > 0 {
+                                        online_attar_disc += item_disc;
+                                        online_attar_disc_u += qty;
+                                    }
                                     if is_it_ret && ret_units > 0 {
                                         online_attar_ret_refunds += refund_line_paisa;
                                         online_attar_ret_units += ret_units;
@@ -7346,6 +7594,10 @@ impl DatabaseManager {
                                     online_perfume_gross += raw_ltotal;
                                     online_perfume_sales += ltotal;
                                     online_perfume_units += qty;
+                                    if item_disc > 0 {
+                                        online_perfume_disc += item_disc;
+                                        online_perfume_disc_u += qty;
+                                    }
                                     if is_it_ret && ret_units > 0 {
                                         online_perfume_ret_refunds += refund_line_paisa;
                                         online_perfume_ret_units += ret_units;
@@ -7359,6 +7611,14 @@ impl DatabaseManager {
                                 }
                             }
                         }
+
+                        online_items_gross_plus_deliv += order_raw_sum + o_delivery;
+                        online_items_disc_total += order_disc_sum;
+                        if order_disc_sum > 0 {
+                            online_items_disc_orders_cnt += 1;
+                        }
+                    } else {
+                        online_items_gross_plus_deliv += o_subtotal + o_delivery + o_refund + o_deduct;
                     }
                 }
             }
@@ -7433,32 +7693,45 @@ impl DatabaseManager {
         let final_attar_gross_paisa = ret_attar_gross + ws_attar_gross + online_attar_gross;
         let final_tester_gross_paisa = ret_tester_gross + online_tester_gross;
 
-        // Invariant: Total gross must always match or exceed the sum of categories, and no category gross should exceed total gross
+        // Invariant: Total gross must always match or exceed the sum of categories, and preserve original items+delivery before partial returns
         let category_sum_gross = final_perfume_gross_paisa + final_attar_gross_paisa + final_tester_gross_paisa;
-        period_gross = category_sum_gross.max(period_gross);
+        let online_cat_disc_sum = online_perfume_disc + online_attar_disc + online_tester_disc;
+        period_gross = category_sum_gross
+            .max(period_gross)
+            .max(retail_gross + wholesale_gross + online_items_gross_plus_deliv);
+        period_discount = retail_discount
+            + wholesale_discount
+            + online_discount.max(online_items_disc_total).max(online_cat_disc_sum);
+        period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders.max(online_items_disc_orders_cnt);
         final_net_sales = (period_gross - period_discount - period_refunds).max(0);
 
-        // Category discount breakdown (Retail + Wholesale)
+        // Category discount breakdown (Retail highest-item special discount + Wholesale + Online)
         let (ret_perfume_disc, ret_perfume_disc_u, ret_attar_disc, ret_attar_disc_u, ret_tester_disc, ret_tester_disc_u): (i64, i64, i64, i64, i64, i64) = conn.query_row(
             &format!(
-                "SELECT
-                   COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND (sii.item_type != 'TESTER' AND sii.product_name NOT LIKE '%Tester%' AND sii.product_name NOT LIKE '%Sample%') THEN
-                       (sii.discount_amount_paisa + CAST(ROUND(1.0 * COALESCE(si.special_discount_paisa, 0) * sii.line_total_paisa / MAX(si.gross_total_paisa, 1)) AS INTEGER))
+                "WITH ranked_items AS (
+                   SELECT sii.*,
+                          ROW_NUMBER() OVER (PARTITION BY sii.invoice_id ORDER BY sii.line_total_paisa DESC) as rn
+                   FROM sales_invoice_items sii
+                   JOIN sales_invoices si ON sii.invoice_id = si.invoice_id
+                   WHERE si.is_voided = 0 AND {}
+                 )
+                 SELECT
+                   COALESCE(SUM(CASE WHEN ri.item_type != 'ATTAR' AND (ri.item_type != 'TESTER' AND ri.product_name NOT LIKE '%Tester%' AND ri.product_name NOT LIKE '%Sample%') THEN
+                       (ri.discount_amount_paisa + CASE WHEN ri.rn = 1 THEN COALESCE(si.special_discount_paisa, 0) ELSE 0 END)
                    ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND (sii.item_type != 'TESTER' AND sii.product_name NOT LIKE '%Tester%' AND sii.product_name NOT LIKE '%Sample%') AND (sii.discount_amount_paisa > 0 OR COALESCE(si.special_discount_paisa, 0) > 0) THEN sii.quantity ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ri.item_type != 'ATTAR' AND (ri.item_type != 'TESTER' AND ri.product_name NOT LIKE '%Tester%' AND ri.product_name NOT LIKE '%Sample%') AND (ri.discount_amount_paisa > 0 OR (ri.rn = 1 AND COALESCE(si.special_discount_paisa, 0) > 0)) THEN ri.quantity ELSE 0 END), 0),
 
-                   COALESCE(SUM(CASE WHEN sii.item_type = 'ATTAR' THEN
-                       (sii.discount_amount_paisa + CAST(ROUND(1.0 * COALESCE(si.special_discount_paisa, 0) * sii.line_total_paisa / MAX(si.gross_total_paisa, 1)) AS INTEGER))
+                   COALESCE(SUM(CASE WHEN ri.item_type = 'ATTAR' THEN
+                       (ri.discount_amount_paisa + CASE WHEN ri.rn = 1 THEN COALESCE(si.special_discount_paisa, 0) ELSE 0 END)
                    ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN sii.item_type = 'ATTAR' AND (sii.discount_amount_paisa > 0 OR COALESCE(si.special_discount_paisa, 0) > 0) THEN sii.quantity ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ri.item_type = 'ATTAR' AND (ri.discount_amount_paisa > 0 OR (ri.rn = 1 AND COALESCE(si.special_discount_paisa, 0) > 0)) THEN ri.quantity ELSE 0 END), 0),
 
-                   COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND (sii.item_type = 'TESTER' OR sii.product_name LIKE '%Tester%' OR sii.product_name LIKE '%Sample%') THEN
-                       (sii.discount_amount_paisa + CAST(ROUND(1.0 * COALESCE(si.special_discount_paisa, 0) * sii.line_total_paisa / MAX(si.gross_total_paisa, 1)) AS INTEGER))
+                   COALESCE(SUM(CASE WHEN ri.item_type != 'ATTAR' AND (ri.item_type = 'TESTER' OR ri.product_name LIKE '%Tester%' OR ri.product_name LIKE '%Sample%') THEN
+                       (ri.discount_amount_paisa + CASE WHEN ri.rn = 1 THEN COALESCE(si.special_discount_paisa, 0) ELSE 0 END)
                    ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND (sii.item_type = 'TESTER' OR sii.product_name LIKE '%Tester%' OR sii.product_name LIKE '%Sample%') AND (sii.discount_amount_paisa > 0 OR COALESCE(si.special_discount_paisa, 0) > 0) THEN sii.quantity ELSE 0 END), 0)
-                 FROM sales_invoice_items sii
-                 JOIN sales_invoices si ON sii.invoice_id = si.invoice_id
-                 WHERE si.is_voided = 0 AND {};",
+                   COALESCE(SUM(CASE WHEN ri.item_type != 'ATTAR' AND (ri.item_type = 'TESTER' OR ri.product_name LIKE '%Tester%' OR ri.product_name LIKE '%Sample%') AND (ri.discount_amount_paisa > 0 OR (ri.rn = 1 AND COALESCE(si.special_discount_paisa, 0) > 0)) THEN ri.quantity ELSE 0 END), 0)
+                 FROM ranked_items ri
+                 JOIN sales_invoices si ON ri.invoice_id = si.invoice_id;",
                 inv_cond_si
             ),
             [],
@@ -7485,12 +7758,12 @@ impl DatabaseManager {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         ).unwrap_or((0, 0, 0, 0));
 
-        let final_perfume_discount_paisa = ret_perfume_disc + ws_perfume_disc;
-        let final_perfume_discount_units = ret_perfume_disc_u + ws_perfume_disc_u;
-        let final_attar_discount_paisa = ret_attar_disc + ws_attar_disc;
-        let final_attar_discount_units = ret_attar_disc_u + ws_attar_disc_u;
-        let final_tester_discount_paisa = ret_tester_disc;
-        let final_tester_discount_units = ret_tester_disc_u;
+        let final_perfume_discount_paisa = ret_perfume_disc + ws_perfume_disc + online_perfume_disc;
+        let final_perfume_discount_units = ret_perfume_disc_u + ws_perfume_disc_u + online_perfume_disc_u;
+        let final_attar_discount_paisa = ret_attar_disc + ws_attar_disc + online_attar_disc;
+        let final_attar_discount_units = ret_attar_disc_u + ws_attar_disc_u + online_attar_disc_u;
+        let final_tester_discount_paisa = ret_tester_disc + online_tester_disc;
+        let final_tester_discount_units = ret_tester_disc_u + online_tester_disc_u;
 
         // 3. Inventory valuations
         let fg_val: i64 = conn.query_row(
@@ -7509,12 +7782,25 @@ impl DatabaseManager {
 
         let total_inv = fg_val + rm_val;
 
-        // 4. Receivables & Liabilities
-        let receivables: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(current_balance_paisa), 0) FROM wholesale_customers WHERE is_active = 1;",
-            [],
-            |r| r.get(0)
-        ).unwrap_or(0);
+        // 4. Receivables & Liabilities (Scoped strictly by selected period; All-time uses ledger balance)
+        let receivables: i64 = if period_type == "all" {
+            conn.query_row(
+                "SELECT COALESCE(SUM(current_balance_paisa), 0) FROM wholesale_customers WHERE is_active = 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap_or(0)
+        } else {
+            conn.query_row(
+                &format!(
+                    "SELECT COALESCE(SUM(wi.balance_due_paisa), 0)
+                     FROM wholesale_invoices wi
+                     WHERE wi.is_voided = 0 AND wi.balance_due_paisa > 0 AND {};",
+                    wi_cond_wi
+                ),
+                [],
+                |r| r.get(0)
+            ).unwrap_or(0)
+        };
 
         let store_credit: i64 = conn.query_row(
             "SELECT COALESCE(SUM(current_credit_balance_paisa), 0) FROM customer_store_credits;",
@@ -7692,18 +7978,15 @@ impl DatabaseManager {
         }
 
         // 9. Payment Settlement Breakdown (Cash, EasyPaisa, JazzCash, Direct Bank) filtered by selected period
-        let onl_pay_cond = match period_type.as_str() {
-            "weekly" => "(date(oop.created_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR date(oop.created_at) >= date('now', '-7 days'))",
-            "monthly" => "(strftime('%Y-%m', oop.created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR strftime('%Y-%m', oop.created_at) = strftime('%Y-%m', 'now'))",
-            "yearly" => "(strftime('%Y', oop.created_at, '+5 hours') = strftime('%Y', 'now', '+5 hours') OR strftime('%Y', oop.created_at) = strftime('%Y', 'now'))",
-            _ => "(date(oop.created_at, '+5 hours') = date('now', '+5 hours') OR date(oop.created_at) = date('now', '+5 hours') OR date(oop.created_at, 'localtime') = date('now', 'localtime'))",
-        };
-
-        let onl_cond_oo = match period_type.as_str() {
-            "weekly" => "(date(oo.created_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR (oo.collected_at IS NOT NULL AND (date(oo.collected_at, '+5 hours') >= date('now', '+5 hours', '-7 days') OR date(oo.collected_at) >= date('now', '-7 days'))))",
-            "monthly" => "(strftime('%Y-%m', oo.created_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours') OR (oo.collected_at IS NOT NULL AND strftime('%Y-%m', oo.collected_at, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')))",
-            "yearly" => "(strftime('%Y', oo.created_at, '+5 hours') = strftime('%Y', 'now', '+5 hours') OR (oo.collected_at IS NOT NULL AND strftime('%Y', oo.collected_at, '+5 hours') = strftime('%Y', 'now', '+5 hours')))",
-            _ => "((date(oo.created_at, '+5 hours') = date('now', '+5 hours') OR date(oo.created_at) = date('now', '+5 hours') OR date(oo.created_at, 'localtime') = date('now', 'localtime')) OR (oo.collected_at IS NOT NULL AND (date(oo.collected_at, '+5 hours') = date('now', '+5 hours') OR date(oo.collected_at) = date('now', '+5 hours') OR date(oo.collected_at, 'localtime') = date('now', 'localtime'))))",
+        let onl_pay_cond = Self::pkt_period_cond("oop.created_at", pt);
+        let onl_cond_oo = if pt == "all" {
+            "1=1".to_string()
+        } else {
+            format!(
+                "({} OR (oo.collected_at IS NOT NULL AND {}))",
+                Self::pkt_period_cond("oo.created_at", pt),
+                Self::pkt_period_cond("oo.collected_at", pt)
+            )
         };
 
         let gross_cash_received_paisa: i64 = conn.query_row(
@@ -8035,7 +8318,15 @@ impl DatabaseManager {
         let all_time_jazzcash_paisa = (all_time_gross_jc - all_time_jc_refunds - all_time_jc_salaries).max(0);
 
         let (total_online_pending_paisa, online_pending_orders_count): (i64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(cod_balance_paisa), 0), COUNT(*) FROM online_orders WHERE payment_status NOT IN ('PAID', 'RETURNED') AND cod_balance_paisa > 0;",
+            &format!(
+                "SELECT COALESCE(SUM(cod_balance_paisa), 0), COUNT(*)
+                 FROM online_orders
+                 WHERE payment_status NOT IN ('PAID', 'RETURNED')
+                   AND delivery_status NOT IN ('CANCELLED', 'RETURNED_RTO', 'RETURNED')
+                   AND cod_balance_paisa > 0
+                   AND {};",
+                onl_cond
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?))
         ).unwrap_or((0, 0));
@@ -10087,6 +10378,7 @@ impl DatabaseManager {
                     UPDATE online_orders
                     SET items_json = ?,
                         subtotal_paisa = ?,
+                        delivery_charges_paisa = COALESCE(?, delivery_charges_paisa),
                         discount_paisa = ?,
                         total_amount_paisa = ?,
                         cod_balance_paisa = ?,
@@ -10101,6 +10393,7 @@ impl DatabaseManager {
                 ", rusqlite::params![
                     rem_json,
                     new_sub,
+                    payload.new_delivery_charges_paisa,
                     new_disc,
                     new_tot,
                     new_cod,
@@ -10275,6 +10568,8 @@ pub struct MarkOnlineReturnPayload {
     pub new_subtotal_paisa: Option<i64>,
     #[serde(default)]
     pub new_discount_paisa: Option<i64>,
+    #[serde(default)]
+    pub new_delivery_charges_paisa: Option<i64>,
     #[serde(default)]
     pub is_partial: Option<bool>,
 }

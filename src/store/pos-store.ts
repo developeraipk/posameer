@@ -217,23 +217,32 @@ export const usePOSStore = create<POSState>((set, get) => ({
 
     const totalBundlePaisa = Math.round(offer.bundle_price * 100);
     const regularTotalPaisa = Math.round(offer.regular_total * 100);
-    const discountRatio = regularTotalPaisa > 0 ? totalBundlePaisa / regularTotalPaisa : 1;
+    const totalSavingsPaisa = Math.max(0, regularTotalPaisa - totalBundlePaisa);
 
-    let runningAllocatedPaisa = 0;
+    // Deduct bundle savings from the highest-priced item(s) first instead of splitting proportionally
+    const indexedTotals = offer.items.map((item, idx) => ({
+      idx,
+      itemRegularTotalPaisa: Math.round(item.unit_regular_price * item.quantity * 100),
+    }));
+    const sortedByPrice = [...indexedTotals].sort((a, b) => b.itemRegularTotalPaisa - a.itemRegularTotalPaisa);
+    let remainingSavings = totalSavingsPaisa;
+    const itemDiscountMap = new Map<number, number>();
+    for (const entry of sortedByPrice) {
+      if (remainingSavings <= 0) {
+        itemDiscountMap.set(entry.idx, 0);
+      } else {
+        const d = Math.min(remainingSavings, entry.itemRegularTotalPaisa);
+        itemDiscountMap.set(entry.idx, d);
+        remainingSavings -= d;
+      }
+    }
+
     const newCartItems: CartItem[] = [];
 
     offer.items.forEach((item, index) => {
-      const isLast = index === offer.items.length - 1;
       const itemRegularTotalPaisa = Math.round(item.unit_regular_price * item.quantity * 100);
-      let itemDealTotalPaisa = Math.round(itemRegularTotalPaisa * discountRatio);
-
-      if (isLast) {
-        itemDealTotalPaisa = Math.max(0, totalBundlePaisa - runningAllocatedPaisa);
-      } else {
-        runningAllocatedPaisa += itemDealTotalPaisa;
-      }
-
-      const itemDiscountPaisa = Math.max(0, itemRegularTotalPaisa - itemDealTotalPaisa);
+      const itemDiscountPaisa = itemDiscountMap.get(index) || 0;
+      const itemDealTotalPaisa = Math.max(0, itemRegularTotalPaisa - itemDiscountPaisa);
       const unitPricePaisa = Math.round(item.unit_regular_price * 100);
       const unitCostPaisa = Math.round((item.unit_cost_price || item.unit_regular_price * 0.5) * 100);
 

@@ -36,6 +36,7 @@ import { getPKTDate, parseDateToPKT } from "@/lib/date-utils";
 import {
   calcOnlineOrderRealizedPaisa,
   calcOnlineOrderPendingCodPaisa,
+  calcOnlineOrderReturnValuePaisa,
 } from "@/lib/online-order-metrics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -305,7 +306,10 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
   const totalWholesalePaidPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.paid_amount_paisa, 0);
   const totalWholesaleUdarPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.balance_due_paisa, 0);
   const totalAllCustomersUdarPaisa = wholesaleCustomers.reduce((acc, c) => acc + (c.current_balance_paisa || 0), 0);
-  const totalPendingUdarToDisplay = totalWholesaleUdarPaisa > 0 ? totalWholesaleUdarPaisa : totalAllCustomersUdarPaisa;
+  const totalPendingUdarToDisplay =
+    period === "ALL"
+      ? Math.max(totalWholesaleUdarPaisa, totalAllCustomersUdarPaisa)
+      : totalWholesaleUdarPaisa;
   const totalWholesaleDiscountsPaisa = 0;
   const totalWholesaleDiscountedCount = 0;
   const totalWholesaleUnits = filteredWholesaleInvoices.length;
@@ -368,13 +372,10 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
       (o.delivery_status as string) === "PARTIAL_RETURN" ||
       (typeof o.refund_amount_paisa === "number" && o.refund_amount_paisa > 0)
   );
-  const totalOnlineReturnsPaisa = returnedOnlineOrders.reduce((acc, o) => {
-    if (typeof o.refund_amount_paisa === "number" && o.refund_amount_paisa > 0) {
-      return acc + o.refund_amount_paisa;
-    }
-    const deduct = o.deduction_amount_paisa || 0;
-    return acc + Math.max(0, o.total_amount_paisa - deduct);
-  }, 0);
+  const totalOnlineReturnsPaisa = returnedOnlineOrders.reduce(
+    (acc, o) => acc + calcOnlineOrderReturnValuePaisa(o),
+    0
+  );
   const totalOnlineReturnsCount = returnedOnlineOrders.length;
 
   // Combined Channel Returns:
