@@ -13,6 +13,10 @@ import {
   WholesaleInvoiceSummary,
   OnlineOrder,
 } from "@/types/database";
+import {
+  calcOnlineOrderRealizedPaisa,
+  calcOnlineOrderPendingCodPaisa,
+} from "./online-order-metrics";
 
 export function showExcelExportNotification(
   fileName: string,
@@ -342,9 +346,12 @@ export function exportAllTablesToSingleCSV(
   const totalPerfumeRetailPaisa = products.reduce((acc, p) => acc + (p.retail_price_paisa * p.current_stock_units), 0);
   const totalExpensesPaisa = expenses.reduce((acc, e) => acc + e.amount_paisa, 0);
   const totalSalariesPaisa = salaries.reduce((acc, s) => acc + s.amount_paisa, 0);
-  const totalOnlinePaisa = onlineOrders.reduce((acc, o) => acc + (o.payment_status !== "RETURNED" ? o.total_amount_paisa : 0), 0);
-  const totalWholesalePaisa = wholesaleInvoices.reduce((acc, w) => acc + w.net_total_paisa, 0);
-  const netCashflowPaisa = totalSalesPaisa + totalOnlinePaisa + totalWholesalePaisa - totalExpensesPaisa - totalSalariesPaisa;
+  const totalOnlineCollectedPaisa = onlineOrders.reduce((acc, o) => acc + calcOnlineOrderRealizedPaisa(o), 0);
+  const totalOnlinePendingCodPaisa = onlineOrders.reduce((acc, o) => acc + calcOnlineOrderPendingCodPaisa(o), 0);
+  const totalWholesaleCollectedPaisa = wholesaleInvoices.reduce((acc, w) => acc + (w.paid_amount_paisa || 0), 0);
+  const totalWholesalePendingUdarPaisa = wholesaleInvoices.reduce((acc, w) => acc + (w.balance_due_paisa || 0), 0);
+  const totalRealizedRevenuePaisa = totalSalesPaisa + totalOnlineCollectedPaisa + totalWholesaleCollectedPaisa;
+  const netCashflowPaisa = totalRealizedRevenuePaisa - totalExpensesPaisa - totalSalariesPaisa;
   const totalCombinedRows = sales.length + products.length + attars.length + expenses.length + salaries.length + wholesaleInvoices.length + onlineOrders.length;
 
   const lines: string[] = [];
@@ -361,7 +368,10 @@ export function exportAllTablesToSingleCSV(
   // Executive KPI Summary Section
   lines.push(escapeCsvField("=== EXECUTIVE KPI SUMMARY (FINANCIAL & INVENTORY METRICS) ==="));
   lines.push(`${escapeCsvField("Metric Category")},${escapeCsvField("Audit Value")},${escapeCsvField("Notes & Scope")}`);
-  lines.push(`${escapeCsvField("Total Net Sales Revenue")},${escapeCsvField(`PKR ${(totalSalesPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Across ${sales.length} completed transactions`)}`);
+  lines.push(`${escapeCsvField("Retail POS Net Sales Revenue")},${escapeCsvField(`PKR ${(totalSalesPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Across ${sales.length} completed transactions`)}`);
+  lines.push(`${escapeCsvField("Online Realized Collections")},${escapeCsvField(`PKR ${(totalOnlineCollectedPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Excludes Pending COD: PKR ${(totalOnlinePendingCodPaisa / 100).toFixed(2)}`)}`);
+  lines.push(`${escapeCsvField("Wholesale Realized Collections")},${escapeCsvField(`PKR ${(totalWholesaleCollectedPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Excludes Pending Udar: PKR ${(totalWholesalePendingUdarPaisa / 100).toFixed(2)}`)}`);
+  lines.push(`${escapeCsvField("Total Realized Net Sales Revenue")},${escapeCsvField(`PKR ${(totalRealizedRevenuePaisa / 100).toFixed(2)}`)},${escapeCsvField("Strict Cash/Collected Basis across Retail, Online & Wholesale")}`);
   lines.push(`${escapeCsvField("Total Discounts Given")},${escapeCsvField(`PKR ${(totalDiscountsPaisa / 100).toFixed(2)}`)},${escapeCsvField("Promotional and item discounts applied")}`);
   lines.push(`${escapeCsvField("Total Fragrance Bottles / Units Sold")},${escapeCsvField(`${totalSalesUnits} Units`)},${escapeCsvField("Retail sales units")}`);
   lines.push(`${escapeCsvField("Finished Perfumes Stock Units")},${escapeCsvField(`${totalPerfumeStock} Bottles`)},${escapeCsvField(`Across ${products.length} active SKUs`)}`);
@@ -370,7 +380,7 @@ export function exportAllTablesToSingleCSV(
   lines.push(`${escapeCsvField("Active Attars & Decants SKUs")},${escapeCsvField(`${attars.length} Products`)},${escapeCsvField("Concentrated perfume oils")}`);
   lines.push(`${escapeCsvField("Total Shop Petty Expenses")},${escapeCsvField(`PKR ${(totalExpensesPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Across ${expenses.length} expense vouchers`)}`);
   lines.push(`${escapeCsvField("Total Staff Salaries Disbursed")},${escapeCsvField(`PKR ${(totalSalariesPaisa / 100).toFixed(2)}`)},${escapeCsvField(`Across ${salaries.length} salary payouts`)}`);
-  lines.push(`${escapeCsvField("Net Operating Cashflow (Revenue - Outflows)")},${escapeCsvField(`PKR ${(netCashflowPaisa / 100).toFixed(2)}`)},${escapeCsvField("Sales minus Expenses and Salaries")}`);
+  lines.push(`${escapeCsvField("Net Operating Cashflow (Realized Revenue - Outflows)")},${escapeCsvField(`PKR ${(netCashflowPaisa / 100).toFixed(2)}`)},${escapeCsvField("Realized Cash minus Expenses and Salaries (Excl. Pending COD/Udar)")}`);
   lines.push("");
   lines.push("");
 

@@ -33,6 +33,10 @@ import {
   exportAllTablesToSingleCSV,
 } from "@/lib/export-utils";
 import { getPKTDate, parseDateToPKT } from "@/lib/date-utils";
+import {
+  calcOnlineOrderRealizedPaisa,
+  calcOnlineOrderPendingCodPaisa,
+} from "@/lib/online-order-metrics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import {
@@ -223,20 +227,33 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     });
   }, [wholesaleInvoices, filterByPeriod, wholesaleSearch]);
 
-  // Online Orders Filtered Dataset
+  const matchesOnlineSearch = (o: OnlineOrder) => {
+    if (!onlineSearch.trim()) return true;
+    const q = onlineSearch.toLowerCase();
+    return (
+      o.order_number.toLowerCase().includes(q) ||
+      o.customer_name.toLowerCase().includes(q) ||
+      o.customer_phone.toLowerCase().includes(q) ||
+      o.city.toLowerCase().includes(q) ||
+      (o.courier_partner && o.courier_partner.toLowerCase().includes(q)) ||
+      (o.tracking_number && o.tracking_number.toLowerCase().includes(q))
+    );
+  };
+
+  // Online Orders Filtered Dataset (Booked within selected period)
   const filteredOnlineOrders = useMemo(() => {
     return onlineOrders.filter((o) => {
       if (!filterByPeriod(o.created_at)) return false;
-      if (!onlineSearch.trim()) return true;
-      const q = onlineSearch.toLowerCase();
-      return (
-        o.order_number.toLowerCase().includes(q) ||
-        o.customer_name.toLowerCase().includes(q) ||
-        o.customer_phone.toLowerCase().includes(q) ||
-        o.city.toLowerCase().includes(q) ||
-        (o.courier_partner && o.courier_partner.toLowerCase().includes(q)) ||
-        (o.tracking_number && o.tracking_number.toLowerCase().includes(q))
-      );
+      return matchesOnlineSearch(o);
+    });
+  }, [onlineOrders, filterByPeriod, onlineSearch]);
+
+  // Online Orders settled/collected within selected period (supports earlier orders collected today)
+  const collectedOnlineOrders = useMemo(() => {
+    return onlineOrders.filter((o) => {
+      if (o.delivery_status === "CANCELLED") return false;
+      if (!filterByPeriod(o.collected_at || o.created_at)) return false;
+      return matchesOnlineSearch(o);
     });
   }, [onlineOrders, filterByPeriod, onlineSearch]);
 
@@ -315,30 +332,26 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     return (o.total_amount_paisa || 0) + (o.discount_paisa || 0) + (o.refund_amount_paisa || 0) + (o.deduction_amount_paisa || 0);
   };
 
-  // Online Orders Metrics:
-  const totalOnlineGrossPaisa = filteredOnlineOrders.reduce(
+  // Online Orders Metrics (Strict distinction between billed volume, pending COD, and realized cash collected):
+  const activeFilteredOnlineOrders = filteredOnlineOrders.filter(
+    (o) => o.delivery_status !== "CANCELLED"
+  );
+  const totalOnlineGrossPaisa = activeFilteredOnlineOrders.reduce(
     (acc, o) => acc + calcOnlineOrderGrossPaisa(o),
     0
   );
-  const totalOnlineBilledPaisa = filteredOnlineOrders.reduce((acc, o) => acc + o.total_amount_paisa, 0);
-  const totalOnlineNetCollectedPaisa = filteredOnlineOrders.reduce((acc, o) => {
-    if (o.payment_status === "RETURNED" || o.delivery_status === "RETURNED_RTO") {
-      return acc + Math.max(0, o.deduction_amount_paisa || 0);
-    }
-    if (o.payment_status === "PAID") {
-      return acc + (o.total_amount_paisa || 0);
-    }
-    const netAdvance = Math.max(0, (o.advance_paid_paisa || 0) - (o.refund_amount_paisa || 0));
-    const codReceived = Math.max(0, (o.total_amount_paisa || 0) - (o.cod_balance_paisa || 0) - netAdvance);
-    return acc + netAdvance + codReceived;
-  }, 0);
-  const totalOnlinePendingCodPaisa = filteredOnlineOrders.reduce((acc, o) => {
-    if (o.payment_status === "RETURNED" || o.delivery_status === "RETURNED_RTO") return acc;
-    return acc + (o.cod_balance_paisa || 0);
-  }, 0);
-  const totalOnlineDiscountsPaisa = filteredOnlineOrders.reduce((acc, o) => acc + (o.discount_paisa || 0), 0);
-  const totalOnlineDiscountedOrdersCount = filteredOnlineOrders.filter((o) => (o.discount_paisa || 0) > 0).length;
-  const totalOnlineUnits = filteredOnlineOrders.reduce((acc, o) => {
+  const totalOnlineBilledPaisa = activeFilteredOnlineOrders.reduce((acc, o) => acc + o.total_amount_paisa, 0);
+  const totalOnlineNetCollectedPaisa = collectedOnlineOrders.reduce(
+    (acc, o) => acc + calcOnlineOrderRealizedPaisa(o),
+    0
+  );
+  const totalOnlinePendingCodPaisa = activeFilteredOnlineOrders.reduce(
+    (acc, o) => acc + calcOnlineOrderPendingCodPaisa(o),
+    0
+  );
+  const totalOnlineDiscountsPaisa = activeFilteredOnlineOrders.reduce((acc, o) => acc + (o.discount_paisa || 0), 0);
+  const totalOnlineDiscountedOrdersCount = activeFilteredOnlineOrders.filter((o) => (o.discount_paisa || 0) > 0).length;
+  const totalOnlineUnits = activeFilteredOnlineOrders.reduce((acc, o) => {
     try {
       const its = JSON.parse(o.items_json);
       return acc + its.reduce((sub: number, it: any) => sub + (it.quantity || 1), 0);
@@ -348,7 +361,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
   }, 0);
 
   // Online Returns & RTOs:
-  const returnedOnlineOrders = filteredOnlineOrders.filter(
+  const returnedOnlineOrders = activeFilteredOnlineOrders.filter(
     (o) =>
       o.payment_status === "RETURNED" ||
       (o.delivery_status as string) === "RETURNED_RTO" ||
@@ -363,8 +376,6 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     return acc + Math.max(0, o.total_amount_paisa - deduct);
   }, 0);
   const totalOnlineReturnsCount = returnedOnlineOrders.length;
-  // Net sales revenue: Pure Gross minus Discounts minus Customer Returns (Prevents double deduction on partial returns)
-  const totalOnlineNetRevenuePaisa = Math.max(0, totalOnlineGrossPaisa - totalOnlineDiscountsPaisa - totalOnlineReturnsPaisa);
 
   // Combined Channel Returns:
   let displayReturnsPaisa = 0;
@@ -383,7 +394,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     displayReturnsCount = totalRetailReturnsCount + totalOnlineReturnsCount;
   }
 
-  // Channel-Filtered Metrics for Header KPIs
+  // Channel-Filtered Metrics for Header KPIs (Cash Realized Basis: Excludes Pending COD & Pending Udar until received)
   let displayGrossRevenuePaisa = 0;
   let displayRealizedRevenuePaisa = 0;
   let displayDiscountsPaisa = 0;
@@ -398,7 +409,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     displayDiscountedCount = totalRetailDiscountedInvoicesCount;
   } else if (channelFilter === "ONLINE") {
     displayGrossRevenuePaisa = totalOnlineGrossPaisa;
-    displayRealizedRevenuePaisa = totalOnlineNetRevenuePaisa;
+    displayRealizedRevenuePaisa = totalOnlineNetCollectedPaisa;
     displayDiscountsPaisa = totalOnlineDiscountsPaisa;
     displayUnitsSold = totalOnlineUnits;
     displayDiscountedCount = totalOnlineDiscountedOrdersCount;
@@ -411,7 +422,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
   } else {
     // ALL Channels Combined
     displayGrossRevenuePaisa = totalRetailGrossPaisa + totalWholesaleGrossPaisa + totalOnlineGrossPaisa;
-    displayRealizedRevenuePaisa = totalRetailNetRevenuePaisa + totalWholesalePaidPaisa + totalOnlineNetRevenuePaisa;
+    displayRealizedRevenuePaisa = totalRetailNetRevenuePaisa + totalWholesalePaidPaisa + totalOnlineNetCollectedPaisa;
     displayDiscountsPaisa = totalRetailDiscountsPaisa + totalWholesaleDiscountsPaisa + totalOnlineDiscountsPaisa;
     displayUnitsSold = totalRetailBottlesSold + totalWholesaleUnits + totalOnlineUnits;
     displayDiscountedCount = totalRetailDiscountedInvoicesCount + totalWholesaleDiscountedCount + totalOnlineDiscountedOrdersCount;
@@ -755,7 +766,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
           <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 6px 8px;">
             <div style="font-size: 8px; font-weight: 800; text-transform: uppercase; color: #166534;">Net Sales Revenue</div>
             <div style="font-size: 13px; font-weight: 900; font-family: monospace; color: #15803d; margin-top: 1px;">Rs. ${formatRs(displayRealizedRevenuePaisa)}</div>
-            <div style="font-size: 7.5px; color: #166534;">Net of Returns & Discounts</div>
+            <div style="font-size: 7.5px; color: #166534;">Realized Cash (Excl. Pending)</div>
           </div>
           <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: 6px 8px;">
             <div style="font-size: 8px; font-weight: 800; text-transform: uppercase; color: #991b1b;">Customer Returns & RTO</div>
@@ -889,13 +900,21 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
               <td style="padding: 4px; text-align: right; font-family: monospace; color: #b91c1c;">-Rs. ${formatRs(totalOnlineReturnsPaisa)}</td>
               <td style="padding: 4px; text-align: center; font-size: 8px;">Deducted from Net</td>
             </tr>
-            <tr style="background: #f0fdf4; font-size: 9.5px; font-weight: 900; color: #166534; border-top: 1px solid #86efac;">
-              <td colspan="6" style="padding: 5px 4px; text-align: right; text-transform: uppercase;">Net Realized Online Sales:</td>
-              <td style="padding: 5px 4px; text-align: center;">-</td>
-              <td style="padding: 5px 4px; text-align: right; font-family: monospace; color: #15803d;">Rs. ${formatRs(Math.max(0, totalOnlineBilledPaisa - totalOnlineReturnsPaisa))}</td>
-              <td></td>
+            ` : ""}
+            ${totalOnlinePendingCodPaisa > 0 ? `
+            <tr style="background: #eff6ff; font-size: 9px; font-weight: 800; color: #1d4ed8; border-top: 1px dashed #93c5fd;">
+              <td colspan="6" style="padding: 4px; text-align: right; text-transform: uppercase;">Pending Courier COD (Not Yet Received):</td>
+              <td style="padding: 4px; text-align: center;">-</td>
+              <td style="padding: 4px; text-align: right; font-family: monospace; color: #2563eb;">Rs. ${formatRs(totalOnlinePendingCodPaisa)}</td>
+              <td style="padding: 4px; text-align: center; font-size: 8px;">Excluded</td>
             </tr>
             ` : ""}
+            <tr style="background: #f0fdf4; font-size: 9.5px; font-weight: 900; color: #166534; border-top: 1px solid #86efac;">
+              <td colspan="6" style="padding: 5px 4px; text-align: right; text-transform: uppercase;">Net Realized Online Sales (Cash Received):</td>
+              <td style="padding: 5px 4px; text-align: center;">-</td>
+              <td style="padding: 5px 4px; text-align: right; font-family: monospace; color: #15803d;">Rs. ${formatRs(totalOnlineNetCollectedPaisa)}</td>
+              <td></td>
+            </tr>
           </tfoot>
         </table>
         ` : ""}
@@ -1817,7 +1836,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
           <span className="text-[10px] text-blue-700/80 dark:text-blue-400/80 font-mono mt-0.5 block truncate">
             {channelFilter === "POS" || channelFilter === "WHOLESALE"
               ? "Not applicable for this channel"
-              : `${filteredOnlineOrders.filter(o => o.cod_balance_paisa > 0 && o.payment_status !== "RETURNED" && o.delivery_status !== "RETURNED_RTO").length} Pending Shipments / Courier COD`}
+              : `${activeFilteredOnlineOrders.filter((o) => calcOnlineOrderPendingCodPaisa(o) > 0).length} Pending Shipments / Courier COD`}
           </span>
         </div>
 
@@ -1892,7 +1911,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
           >
             Rs. {formatRs(netEstimatedMarginPaisa)}
           </span>
-          <span className="text-[10px] text-slate-500 font-mono mt-0.5 block truncate" title="Cash Realized Basis (Excludes Pending Credit / Udar)">
+          <span className="text-[10px] text-slate-500 font-mono mt-0.5 block truncate" title="Cash Realized Basis (Excludes Pending Wholesale Udar & Pending Online COD)">
             Cash Basis (Excl. Pending Receivables)
           </span>
         </div>

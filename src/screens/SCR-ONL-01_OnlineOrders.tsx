@@ -25,6 +25,10 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { getPKTDate, parseDateToPKT } from "@/lib/date-utils";
 import {
+  calcOnlineOrderRealizedPaisa,
+  calcOnlineOrderPendingCodPaisa,
+} from "@/lib/online-order-metrics";
+import {
   Globe,
   MessageSquare,
   Search,
@@ -314,40 +318,30 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
     return ref + ded > 0 ? ref + ded : calcOrderGrossPaisa(o);
   };
 
-  // Total Gross Order Value (Intact gross sales volume)
-  const totalGrossOrderValuePaisa = periodFilteredOrders.reduce((sum, o) => sum + calcOrderGrossPaisa(o), 0);
-  const waGrossOrderValuePaisa = waOrders.reduce((sum, o) => sum + calcOrderGrossPaisa(o), 0);
-  const webGrossOrderValuePaisa = webOrders.reduce((sum, o) => sum + calcOrderGrossPaisa(o), 0);
-
-  // Pending Receivables (COD)
-  const waPendingPaisa = waOrders.reduce(
-    (sum, o) => sum + (o.payment_status !== "RETURNED" ? o.cod_balance_paisa : 0),
+  // Total Gross Order Value (Intact gross sales volume for non-cancelled orders)
+  const activeWaOrders = waOrders.filter((o) => o.delivery_status !== "CANCELLED");
+  const activeWebOrders = webOrders.filter((o) => o.delivery_status !== "CANCELLED");
+  const totalGrossOrderValuePaisa = [...activeWaOrders, ...activeWebOrders].reduce(
+    (sum, o) => sum + calcOrderGrossPaisa(o),
     0
   );
-  const webPendingPaisa = webOrders.reduce(
-    (sum, o) => sum + (o.payment_status !== "RETURNED" ? o.cod_balance_paisa : 0),
+  const waGrossOrderValuePaisa = activeWaOrders.reduce((sum, o) => sum + calcOrderGrossPaisa(o), 0);
+  const webGrossOrderValuePaisa = activeWebOrders.reduce((sum, o) => sum + calcOrderGrossPaisa(o), 0);
+
+  // Pending Receivables (COD)
+  const waPendingPaisa = activeWaOrders.reduce(
+    (sum, o) => sum + calcOnlineOrderPendingCodPaisa(o),
+    0
+  );
+  const webPendingPaisa = activeWebOrders.reduce(
+    (sum, o) => sum + calcOnlineOrderPendingCodPaisa(o),
     0
   );
   const totalPendingPaisa = waPendingPaisa + webPendingPaisa;
 
   // Realized Net Cash Collected (Total actual cash/payments collected minus all refunds)
-  const calcOrderRealizedPaisa = (o: OnlineOrder): number => {
-    if (o.payment_status === "RETURNED" || o.delivery_status === "RETURNED_RTO") {
-      return o.deduction_amount_paisa || 0;
-    }
-    const netAdvance = Math.max(0, (o.advance_paid_paisa || 0) - (o.refund_amount_paisa || 0));
-    if (o.payment_status === "PAID") {
-      if ((o.refund_amount_paisa || 0) > 0) {
-        return Math.min(o.total_amount_paisa || 0, netAdvance > 0 ? netAdvance : (o.total_amount_paisa || 0));
-      }
-      return o.total_amount_paisa || 0;
-    }
-    const codReceived = Math.max(0, (o.total_amount_paisa || 0) - (o.cod_balance_paisa || 0) - netAdvance);
-    return netAdvance + codReceived;
-  };
-
-  const waCollectedPaisa = waOrders.reduce((sum, o) => sum + calcOrderRealizedPaisa(o), 0);
-  const webCollectedPaisa = webOrders.reduce((sum, o) => sum + calcOrderRealizedPaisa(o), 0);
+  const waCollectedPaisa = activeWaOrders.reduce((sum, o) => sum + calcOnlineOrderRealizedPaisa(o), 0);
+  const webCollectedPaisa = activeWebOrders.reduce((sum, o) => sum + calcOnlineOrderRealizedPaisa(o), 0);
   const totalCollectedPaisa = waCollectedPaisa + webCollectedPaisa;
 
   // Custodian split of pending money
