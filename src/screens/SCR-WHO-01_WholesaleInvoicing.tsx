@@ -1989,7 +1989,7 @@ export const WholesaleInvoicing: React.FC<WholesaleProps> = ({ currentUser }) =>
                   <Input
                     value={newCustContact}
                     onChange={(e) => setNewCustContact(e.target.value)}
-                    placeholder="e.g. M Ibrar Khan"
+                    placeholder="e.g. Bilal Ahmed"
                   />
                 </div>
               </div>
@@ -2002,7 +2002,7 @@ export const WholesaleInvoicing: React.FC<WholesaleProps> = ({ currentUser }) =>
                   <Input
                     value={newCustPhone}
                     onChange={(e) => setNewCustPhone(e.target.value)}
-                    placeholder="e.g. 0332-6485172"
+                    placeholder="e.g. 0300-0000000"
                     required
                   />
                 </div>
@@ -2090,7 +2090,7 @@ export const WholesaleInvoicing: React.FC<WholesaleProps> = ({ currentUser }) =>
                   <Input
                     value={editCustPhone}
                     onChange={(e) => setEditCustPhone(e.target.value)}
-                    placeholder="e.g. 0332-6485172"
+                    placeholder="e.g. 0300-0000000"
                     required
                   />
                 </div>

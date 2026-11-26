@@ -2,6 +2,26 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_cloud_api_url() -> String {
+    String::new()
+}
+
+fn default_cloud_api_token() -> String {
+    String::new()
+}
+
+fn default_auto_sync_minutes() -> u32 {
+    5
+}
+
+fn default_last_synced_at() -> Option<String> {
+    None
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub store_name: String,
@@ -16,6 +36,16 @@ pub struct AppConfig {
     pub is_primary_server: bool,
     pub mesh_port: u16,
     pub peer_station_id: String,
+    #[serde(default = "default_true")]
+    pub cloud_sync_enabled: bool,
+    #[serde(default = "default_cloud_api_url")]
+    pub cloud_api_url: String,
+    #[serde(default = "default_cloud_api_token")]
+    pub cloud_api_token: String,
+    #[serde(default = "default_auto_sync_minutes")]
+    pub cloud_auto_sync_minutes: u32,
+    #[serde(default = "default_last_synced_at")]
+    pub cloud_last_synced_at: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -33,6 +63,11 @@ impl Default for AppConfig {
             is_primary_server: true,
             mesh_port: 7878,
             peer_station_id: "POS-02".to_string(),
+            cloud_sync_enabled: true,
+            cloud_api_url: String::new(),
+            cloud_api_token: String::new(),
+            cloud_auto_sync_minutes: 5,
+            cloud_last_synced_at: None,
         }
     }
 }

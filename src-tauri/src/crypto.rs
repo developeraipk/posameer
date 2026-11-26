@@ -131,7 +131,7 @@ struct RateLimiter {
 static RATE_LIMITER: Mutex<Option<RateLimiter>> = Mutex::new(None);
 
 pub fn check_rate_limit() -> Result<(), String> {
-    let mut guard = RATE_LIMITER.lock().unwrap();
+    let mut guard = RATE_LIMITER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(RateLimiter {
             failed_attempts: 0,
@@ -166,7 +166,7 @@ pub fn check_rate_limit() -> Result<(), String> {
 }
 
 pub fn record_auth_failure() -> usize {
-    let mut guard = RATE_LIMITER.lock().unwrap();
+    let mut guard = RATE_LIMITER.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
         *guard = Some(RateLimiter {
             failed_attempts: 0,
@@ -187,7 +187,7 @@ pub fn record_auth_failure() -> usize {
 }
 
 pub fn record_auth_success() {
-    let mut guard = RATE_LIMITER.lock().unwrap();
+    let mut guard = RATE_LIMITER.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(limiter) = guard.as_mut() {
         limiter.failed_attempts = 0;
         limiter.lockout_until = None;

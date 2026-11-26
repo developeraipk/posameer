@@ -4,6 +4,11 @@ import {
   triggerLanReplication,
   enqueueSyncEvent,
   triggerCloudSync,
+  getCloudSyncSettings,
+  saveCloudSyncSettings,
+  testCloudConnection,
+  triggerFullCloudSnapshotSync,
+  uploadCloudBackup,
   clearSyncJournal,
   getNetworkStationConfig,
   saveNetworkStationConfig,
@@ -28,6 +33,10 @@ import {
   Save,
   Cloud,
   CloudDownload,
+  Upload,
+  Database,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 
 interface SyncCenterProps {
@@ -35,9 +44,31 @@ interface SyncCenterProps {
   status: WorkstationStatus;
 }
 
-export const SyncCenter: React.FC<SyncCenterProps> = ({ currentUser: _currentUser, status }) => {
+export const SyncCenter: React.FC<SyncCenterProps> = ({ currentUser, status }) => {
   const [loading, setLoading] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+
+  // Hostinger Shared Cloud Config States
+  const [cloudEnabled, setCloudEnabled] = useState(true);
+  const [cloudUrl, setCloudUrl] = useState("");
+  const [cloudToken, setCloudToken] = useState("");
+  const [showCloudToken, setShowCloudToken] = useState(false);
+  const [cloudAutoMinutes, setCloudAutoMinutes] = useState(5);
+  const [cloudLastSynced, setCloudLastSynced] = useState<string | null>(null);
+  const [cloudBusy, setCloudBusy] = useState(false);
+  const [cloudFeedback, setCloudFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    getCloudSyncSettings()
+      .then((cfg) => {
+        setCloudEnabled(cfg.cloud_sync_enabled);
+        setCloudUrl(cfg.cloud_api_url || "");
+        setCloudToken(cfg.cloud_api_token || "");
+        setCloudAutoMinutes(cfg.cloud_auto_sync_minutes || 5);
+        setCloudLastSynced(cfg.cloud_last_synced_at);
+      })
+      .catch(() => {});
+  }, []);
 
   // Network Multi-Station Setup States
   const [networkConfig, setNetworkConfig] = useState<NetworkStationConfig | null>(null);
@@ -54,7 +85,8 @@ export const SyncCenter: React.FC<SyncCenterProps> = ({ currentUser: _currentUse
       await setTerminalBlockedStatus(
         "POS-02",
         nextState,
-        nextState ? "PC-2 database access revoked by Admin" : ""
+        nextState ? "PC-2 database access revoked by Admin" : "",
+        currentUser?.user_id || ""
       );
       setNetFeedback({
         type: nextState ? "error" : "success",
@@ -196,17 +228,93 @@ export const SyncCenter: React.FC<SyncCenterProps> = ({ currentUser: _currentUse
     }
   };
 
+  const persistCloudSettings = async () => {
+    const saved = await saveCloudSyncSettings({
+      cloudSyncEnabled: cloudEnabled,
+      cloudApiUrl: cloudUrl.trim(),
+      cloudApiToken: cloudToken.trim(),
+      cloudAutoSyncMinutes: Number(cloudAutoMinutes) || 5,
+    });
+    setCloudUrl(saved.cloud_api_url);
+    setCloudToken(saved.cloud_api_token);
+    setCloudAutoMinutes(saved.cloud_auto_sync_minutes);
+    setCloudLastSynced(saved.cloud_last_synced_at);
+    return saved;
+  };
+
+  const handleSaveAndTestCloud = async () => {
+    setCloudBusy(true);
+    setCloudFeedback(null);
+    try {
+      await persistCloudSettings();
+      const statusRes = await testCloudConnection();
+      setCloudFeedback({
+        type: statusRes.is_online ? "success" : "error",
+        text: statusRes.message,
+      });
+    } catch (err: any) {
+      setCloudFeedback({ type: "error", text: String(err) });
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+
   const handleTriggerCloudSync = async () => {
     setLoading(true);
+    setCloudBusy(true);
     setSyncFeedback(null);
+    setCloudFeedback(null);
     try {
+      await persistCloudSettings();
       const res = await triggerCloudSync("MANUAL_BIDIRECTIONAL");
+      setCloudFeedback({ type: "success", text: res.message });
       setSyncFeedback(`Cloud Sync: ${res.message}`);
+      const updated = await getCloudSyncSettings();
+      setCloudLastSynced(updated.cloud_last_synced_at);
       await loadSyncData();
     } catch (err: any) {
-      setSyncFeedback(`Cloud Sync: ${String(err)}`);
+      const msg = String(err);
+      setCloudFeedback({ type: "error", text: msg });
+      setSyncFeedback(`Cloud Sync Error: ${msg}`);
     } finally {
       setLoading(false);
+      setCloudBusy(false);
+    }
+  };
+
+  const handleFullCloudSnapshot = async () => {
+    setLoading(true);
+    setCloudBusy(true);
+    setCloudFeedback(null);
+    try {
+      await persistCloudSettings();
+      const res = await triggerFullCloudSnapshotSync();
+      setCloudFeedback({ type: "success", text: res.message });
+      const updated = await getCloudSyncSettings();
+      setCloudLastSynced(updated.cloud_last_synced_at);
+      await loadSyncData();
+    } catch (err: any) {
+      setCloudFeedback({ type: "error", text: String(err) });
+    } finally {
+      setLoading(false);
+      setCloudBusy(false);
+    }
+  };
+
+  const handleUploadCloudBackup = async () => {
+    setCloudBusy(true);
+    setCloudFeedback(null);
+    try {
+      await persistCloudSettings();
+      const res = await uploadCloudBackup();
+      setCloudFeedback({
+        type: "success",
+        text: `${res.message} File: ${res.filename} (${(res.file_size_bytes / 1024).toFixed(1)} KB)`,
+      });
+    } catch (err: any) {
+      setCloudFeedback({ type: "error", text: String(err) });
+    } finally {
+      setCloudBusy(false);
     }
   };
 
@@ -281,55 +389,175 @@ export const SyncCenter: React.FC<SyncCenterProps> = ({ currentUser: _currentUse
         </div>
       )}
 
-      {/* Cloud Database Synchronization (Hostinger Cloud DB) */}
+      {/* Cloud Database Synchronization (Hostinger Shared MySQL + Owner Web Dashboard) */}
       <div className="bg-white dark:bg-slate-900 border border-blue-500/30 rounded-2xl p-5 shadow-sm flex flex-col gap-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-b border-slate-200 dark:border-slate-800 pb-3">
           <div className="flex items-center gap-2.5">
-            <Cloud className="w-5 h-5 text-blue-500" />
+            <Cloud className="w-5 h-5 text-blue-500 shrink-0" />
             <div>
               <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                Hostinger Cloud Database Synchronization
+                Hostinger Cloud MySQL &amp; Live Owner Dashboard Sync
               </h2>
               <p className="text-[11px] text-slate-500">
-                Bidirectional synchronization: push offline local sales up to the cloud, and download/pull cloud database changes directly into local SQLite storage.
+                Subdomain-isolated HTTPS sync to your Hostinger Business Plan MySQL database. Local POS billing works 100% offline first.
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleSaveAndTestCloud}
+              disabled={cloudBusy || loading}
+              className="flex items-center gap-1.5 text-xs cursor-pointer"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>Save &amp; Test</span>
+            </Button>
+
             <Button
               variant="primary"
               size="sm"
               onClick={handleTriggerCloudSync}
-              disabled={loading}
+              disabled={cloudBusy || loading}
               className="bg-blue-600 hover:bg-blue-500 text-white font-bold flex items-center gap-1.5 text-xs shadow-xs cursor-pointer"
             >
-              <CloudDownload className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-              <span>Trigger Cloud Sync (Download & Upload)</span>
+              <CloudDownload className={`w-4 h-4 ${cloudBusy ? "animate-spin" : ""}`} />
+              <span>Sync Now</span>
+            </Button>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleFullCloudSnapshot}
+              disabled={cloudBusy || loading}
+              className="border border-blue-500/40 text-blue-700 dark:text-blue-300 flex items-center gap-1.5 text-xs cursor-pointer"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Sync All Shop Data</span>
+            </Button>
+
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={handleUploadCloudBackup}
+              disabled={cloudBusy || loading}
+              className="flex items-center gap-1.5 text-xs cursor-pointer"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>Upload .db Backup</span>
             </Button>
           </div>
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-3 text-xs select-text">
+          <div className="md:col-span-5">
+            <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+              Hostinger Subdomain URL (e.g. https://pos.yourdomain.com)
+            </label>
+            <input
+              type="url"
+              value={cloudUrl}
+              onChange={(e) => setCloudUrl(e.target.value)}
+              placeholder="https://pos.yourdomain.com"
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs"
+            />
+          </div>
+
+          <div className="md:col-span-4">
+            <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+              Cloud API Bearer Token (from config.php)
+            </label>
+            <div className="relative flex items-center">
+              <input
+                type={showCloudToken ? "text" : "password"}
+                value={cloudToken}
+                onChange={(e) => setCloudToken(e.target.value)}
+                placeholder="Paste api_token from Hostinger config.php"
+                className="w-full px-3 py-2 pr-9 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCloudToken((v) => !v)}
+                className="absolute right-2.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 cursor-pointer"
+                title={showCloudToken ? "Hide Token" : "Show Token"}
+              >
+                {showCloudToken ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+          </div>
+
+          <div className="md:col-span-3 flex items-end gap-2">
+            <div className="flex-1">
+              <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-400 mb-1">
+                Auto Sync (Min)
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={120}
+                value={cloudAutoMinutes}
+                onChange={(e) => setCloudAutoMinutes(Math.max(1, Math.min(120, Number(e.target.value) || 5)))}
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 font-mono text-xs"
+              />
+            </div>
+            <label className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={cloudEnabled}
+                onChange={(e) => setCloudEnabled(e.target.checked)}
+              />
+              <span className="font-semibold text-[11px]">Auto</span>
+            </label>
+          </div>
+        </div>
+
+        {cloudFeedback && (
+          <div
+            className={`p-3 rounded-xl text-xs border flex items-center gap-2 ${
+              cloudFeedback.type === "success"
+                ? "bg-emerald-50 dark:bg-emerald-950/30 border-emerald-500/40 text-emerald-800 dark:text-emerald-300"
+                : "bg-red-50 dark:bg-red-950/30 border-red-500/40 text-red-800 dark:text-red-300"
+            }`}
+          >
+            {cloudFeedback.type === "success" ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+            ) : (
+              <ShieldAlert className="w-4 h-4 shrink-0" />
+            )}
+            <span>{cloudFeedback.text}</span>
+          </div>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
           <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-            <div className="text-slate-500 text-[11px]">Cloud Database Target</div>
-            <div className="font-mono font-bold text-slate-800 dark:text-slate-200 mt-1">Hostinger MySQL / Cloud DB</div>
-            <div className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1">
+            <div className="text-slate-500 text-[11px]">Cloud Endpoint Status</div>
+            <div className="font-mono font-bold text-slate-800 dark:text-slate-200 mt-1 truncate">
+              {cloudUrl.trim() ? cloudUrl.trim() : "Not Configured Yet"}
+            </div>
+            <div className={`text-[10px] mt-1 flex items-center gap-1 ${cloudUrl.trim() && cloudToken.trim() ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"}`}>
               <CheckCircle2 className="w-3 h-3" />
-              <span>Remote Access Ready</span>
+              <span>{cloudUrl.trim() && cloudToken.trim() ? "Hostinger Credentials Saved" : "Enter Subdomain URL & Token"}</span>
             </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-            <div className="text-slate-500 text-[11px]">Sync Direction</div>
-            <div className="font-mono font-bold text-slate-800 dark:text-slate-200 mt-1">Two-Way (Push & Pull)</div>
-            <div className="text-[10px] text-slate-500 mt-1">Download to Local + Upload to Cloud</div>
+            <div className="text-slate-500 text-[11px]">Outbox Queue &amp; Schedule</div>
+            <div className="font-mono font-bold text-slate-800 dark:text-slate-200 mt-1">
+              Auto every {cloudAutoMinutes} min ({cloudEnabled ? "ON" : "PAUSED"})
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1">
+              Live Outbox Pending Events: <strong>{status.outboxPendingCount}</strong>
+            </div>
           </div>
 
           <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
-            <div className="text-slate-500 text-[11px]">Offline Safety Fallback</div>
-            <div className="font-mono font-bold text-emerald-700 dark:text-emerald-400 mt-1">100% Local-First SQLite</div>
-            <div className="text-[10px] text-slate-500 mt-1">Transactions queued when offline</div>
+            <div className="text-slate-500 text-[11px]">Last Successful Cloud Sync</div>
+            <div className="font-mono font-bold text-emerald-700 dark:text-emerald-400 mt-1 truncate">
+              {cloudLastSynced ? new Date(cloudLastSynced).toLocaleString() : "Never synced yet"}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1">SQLite Offline-First Always Protected</div>
           </div>
         </div>
       </div>

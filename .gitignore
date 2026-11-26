@@ -43,3 +43,7 @@ tsconfig.tsbuildinfo
 *.db-shm
 *.sqlite
 *.sqlite3
+
+# Hostinger live cloud credentials & backups
+hostinger-cloud/config.php
+hostinger-cloud/backups/

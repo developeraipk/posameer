@@ -38,6 +38,35 @@ pub fn run() {
         eprintln!("SQLite Database Initialization status: {}", e);
     }
 
+    // Background Hostinger Cloud auto-sync & offline retry daemon (non-blocking)
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let mut secs_elapsed: u64 = 0;
+        loop {
+            let cfg = config::ConfigManager::new().load_or_create();
+            let interval_secs = (cfg.cloud_auto_sync_minutes.clamp(1, 120) as u64) * 60;
+            if cfg.cloud_sync_enabled
+                && !cfg.cloud_api_url.trim().is_empty()
+                && !cfg.cloud_api_token.trim().is_empty()
+            {
+                let (pending, _, _) = db::DatabaseManager::new().get_outbox_counts();
+                if secs_elapsed == 0 || secs_elapsed % interval_secs == 0 {
+                    let client = cloud_sync::CloudSyncClient::from_config();
+                    if let Err(e) = client.sync_bidirectional("AUTO_BACKGROUND_SYNC") {
+                        eprintln!("Cloud background sync notice: {}", e);
+                    }
+                } else if pending > 0 {
+                    let client = cloud_sync::CloudSyncClient::from_config();
+                    if let Err(e) = client.push_events("AUTO_RETRY_PENDING") {
+                        eprintln!("Cloud pending retry notice: {}", e);
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            secs_elapsed = secs_elapsed.saturating_add(30);
+        }
+    });
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
@@ -61,7 +90,6 @@ pub fn run() {
             commands::create_product,
             commands::update_product,
             commands::delete_product,
-            commands::clear_all_products,
             commands::get_salespersons,
             commands::get_all_salespersons,
             commands::create_salesperson,
@@ -97,8 +125,6 @@ pub fn run() {
             commands::create_attar,
             commands::update_attar,
             commands::delete_attar,
-            commands::clear_all_attars,
-            commands::reset_database_for_testing,
             commands::get_shifts,
             commands::get_active_shift,
             commands::open_shift,
@@ -135,6 +161,11 @@ pub fn run() {
             commands::get_lan_sync_server_status,
             commands::push_cloud_sync,
             commands::trigger_cloud_sync,
+            commands::get_cloud_sync_settings,
+            commands::save_cloud_sync_settings,
+            commands::test_cloud_connection,
+            commands::trigger_full_cloud_snapshot_sync,
+            commands::upload_cloud_backup,
             commands::print_raw_escpos_receipt,
             commands::send_raw_pole_display,
             commands::kick_cash_drawer_hardware,

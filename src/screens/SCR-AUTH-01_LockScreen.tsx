@@ -314,7 +314,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({
               <div className="relative">
                 <input
                   type="text"
-                  placeholder="Enter username (e.g. Ibrar khan)"
+                  placeholder="Enter username (e.g. admin)"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="w-full px-3 py-2 pl-9 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
@@ -331,7 +331,7 @@ export const LockScreen: React.FC<LockScreenProps> = ({
               <div className="relative">
                 <input
                   type={showPassword ? "text" : "password"}
-                  placeholder="Enter password (e.g. 0332-6485172)"
+                  placeholder="Enter password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="w-full px-3 py-2 pl-9 pr-10 bg-slate-100 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"

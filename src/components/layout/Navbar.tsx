@@ -20,14 +20,12 @@ import {
   RefreshCw,
   SlidersHorizontal,
   KeyRound,
-  Trash2,
   ShieldCheck,
   BadgeDollarSign,
   TrendingUp,
   Globe,
   Truck,
 } from "lucide-react";
-import { resetDatabaseForTesting } from "@/lib/tauri-bridge";
 import logoNavbar from "@/assets/logo-rect.png";
 
 export type ActiveScreen =
@@ -164,23 +162,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   const handleSelectScreen = (screen: ActiveScreen) => {
     onNavigate(screen);
     setOpenDropdown(null);
-  };
-
-  const handleMasterDatabaseReset = async () => {
-    const confirmed = window.confirm(
-      "⚠️ WARNING: Are you sure you want to completely reset the system database?\n\nThis will purge all operational transactions, wholesale invoices, register shifts, inventory movements, and ledger entries, restoring a clean factory state.\n\nPress OK to proceed with factory reset."
-    );
-    if (!confirmed) return;
-    try {
-      await resetDatabaseForTesting();
-      localStorage.clear();
-      sessionStorage.clear();
-      localStorage.setItem("ameer_database_cleared", "true");
-      alert("✅ Database has been successfully reset to factory state. The application will now reload.");
-      window.location.reload();
-    } catch (err) {
-      alert("Failed to reset database: " + String(err));
-    }
   };
 
   return (
@@ -811,25 +792,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                       <div className="flex-1">
                         <span className="font-semibold">Log Out</span>
                         <p className="text-[10px] text-slate-400">Exit active workstation session</p>
-                      </div>
-                    </button>
-                  )}
-
-                  {/* Database Clear / Reset Action for Super Admin */}
-                  {isSuperAdmin && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenDropdown(null);
-                        handleMasterDatabaseReset();
-                      }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 text-left transition-colors cursor-pointer border-t border-slate-100 dark:border-slate-800/80 pt-2 mt-1"
-                      title="Purge all operational tables and reset database to clean factory state"
-                    >
-                      <Trash2 className="w-4 h-4 text-rose-500 shrink-0" />
-                      <div className="flex-1">
-                        <span className="font-semibold text-rose-600 dark:text-rose-400">Clear / Reset Database</span>
-                        <p className="text-[10px] text-slate-400">Factory clean reset for testing</p>
                       </div>
                     </button>
                   )}

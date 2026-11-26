@@ -199,8 +199,18 @@ pub fn read_local_config() -> Result<AppConfig, String> {
 
 // 8. Write local workstation configuration
 #[tauri::command]
-pub fn write_local_config(config: AppConfig) -> Result<bool, String> {
+pub fn write_local_config(mut config: AppConfig) -> Result<bool, String> {
     let mgr = ConfigManager::new();
+    let existing = mgr.load_or_create();
+    if config.cloud_api_url.trim().is_empty() && !existing.cloud_api_url.trim().is_empty() {
+        config.cloud_api_url = existing.cloud_api_url;
+    }
+    if config.cloud_api_token.trim().is_empty() && !existing.cloud_api_token.trim().is_empty() {
+        config.cloud_api_token = existing.cloud_api_token;
+    }
+    if config.cloud_last_synced_at.is_none() {
+        config.cloud_last_synced_at = existing.cloud_last_synced_at;
+    }
     mgr.save(&config).map_err(|e| e.to_string())?;
     Ok(true)
 }
@@ -211,6 +221,8 @@ pub fn get_workstation_status() -> Result<WorkstationStatusDto, String> {
     let config = ConfigManager::new().load_or_create();
     let db = DatabaseManager::new();
     let (tables, indexes, triggers) = db.get_counts().unwrap_or((46, 105, 16));
+    let (pending, quarantined, wal_kb) = db.get_outbox_counts();
+    let cloud_configured = !config.cloud_api_url.trim().is_empty() && !config.cloud_api_token.trim().is_empty();
 
     Ok(WorkstationStatusDto {
         station_id: config.station_id,
@@ -220,15 +232,15 @@ pub fn get_workstation_status() -> Result<WorkstationStatusDto, String> {
         peer_connected: true,
         peer_station_id: config.peer_station_id,
         peer_last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
-        outbox_pending_count: 0,
-        quarantine_conflict_count: 0,
-        sqlite_wal_size_kb: 128,
+        outbox_pending_count: pending.max(0) as usize,
+        quarantine_conflict_count: quarantined.max(0) as usize,
+        sqlite_wal_size_kb: wal_kb.max(0) as usize,
         database_tables_count: tables,
         database_indexes_count: indexes,
         database_triggers_count: triggers,
-        cloud_sync_enabled: true,
-        cloud_last_synced_at: Some(chrono::Utc::now().to_rfc3339()),
-        cloud_sync_delayed: false,
+        cloud_sync_enabled: config.cloud_sync_enabled && cloud_configured,
+        cloud_last_synced_at: config.cloud_last_synced_at,
+        cloud_sync_delayed: pending > 0 && config.cloud_sync_enabled && cloud_configured,
     })
 }
 
@@ -289,7 +301,10 @@ pub fn update_user_security(
     new_role: Option<String>,
     is_active: Option<bool>,
 ) -> Result<bool, String> {
-    let caller = caller_user_id.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "usr_ibrar".to_string());
+    let caller = caller_user_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Access Denied: Authenticated Super Admin session required.".to_string())?;
     let db = DatabaseManager::new();
     db.update_user_security(
         &caller,
@@ -309,9 +324,12 @@ pub fn delete_user(
     caller_user_id: String,
     target_user_id: String,
 ) -> Result<bool, String> {
-    let caller = if caller_user_id.trim().is_empty() { "usr_ibrar".to_string() } else { caller_user_id };
+    let caller = caller_user_id.trim();
+    if caller.is_empty() {
+        return Err("Access Denied: Authenticated Super Admin session required.".to_string());
+    }
     let db = DatabaseManager::new();
-    db.delete_user(&caller, &target_user_id)
+    db.delete_user(caller, &target_user_id)
 }
 
 // Create New Staff Account (Super Admin Only)
@@ -324,9 +342,12 @@ pub fn create_user(
     pin: String,
     password: String,
 ) -> Result<SystemUserDto, String> {
-    let caller = if caller_user_id.trim().is_empty() { "usr_ibrar".to_string() } else { caller_user_id };
+    let caller = caller_user_id.trim();
+    if caller.is_empty() {
+        return Err("Access Denied: Authenticated Super Admin session required.".to_string());
+    }
     let db = DatabaseManager::new();
-    db.create_user(&caller, &username, &full_name, &role, &pin, &password)
+    db.create_user(caller, &username, &full_name, &role, &pin, &password)
         .map(|u| SystemUserDto {
             user_id: u.user_id,
             username: u.username,
@@ -369,12 +390,6 @@ pub fn delete_product(product_id: Option<String>, productId: Option<String>) -> 
     let id = product_id.or(productId).ok_or_else(|| "Missing product ID".to_string())?;
     let db = DatabaseManager::new();
     db.delete_product(&id)
-}
-
-#[tauri::command]
-pub fn clear_all_products() -> Result<bool, String> {
-    let db = DatabaseManager::new();
-    db.clear_all_products()
 }
 
 #[tauri::command]
@@ -634,18 +649,6 @@ pub fn delete_attar(attar_id: Option<String>, attarId: Option<String>) -> Result
     let id = attar_id.or(attarId).ok_or_else(|| "Missing attar ID".to_string())?;
     let db = DatabaseManager::new();
     db.delete_attar(&id)
-}
-
-#[tauri::command]
-pub fn clear_all_attars() -> Result<bool, String> {
-    let db = DatabaseManager::new();
-    db.clear_all_attars()
-}
-
-#[tauri::command]
-pub fn reset_database_for_testing() -> Result<String, String> {
-    let db = DatabaseManager::new();
-    db.reset_database_for_testing()
 }
 
 // ----------------------------------------------------------------------------
@@ -937,6 +940,15 @@ pub fn restore_database(source_file_path: String) -> Result<String, String> {
         let _ = std::fs::create_dir_all(&dest_dir);
     }
     let dest_file = dest_dir.join("ameer_pos.db");
+    let wal_file = dest_dir.join("ameer_pos.db-wal");
+    let shm_file = dest_dir.join("ameer_pos.db-shm");
+
+    if wal_file.exists() {
+        let _ = std::fs::remove_file(&wal_file);
+    }
+    if shm_file.exists() {
+        let _ = std::fs::remove_file(&shm_file);
+    }
 
     std::fs::copy(&source_path, &dest_file)
         .map_err(|e| format!("Failed to replace live database: {}", e))?;
@@ -1008,21 +1020,85 @@ pub fn get_lan_sync_server_status() -> Result<bool, String> {
 }
 
 // ============================================================================
-// MODULE 17: HYBRID CLOUD NESTJS HTTP SYNCHRONIZATION COMMANDS
+// MODULE 17: HOSTINGER SHARED CLOUD HTTPS SYNCHRONIZATION COMMANDS
 // ============================================================================
 
 #[tauri::command]
 pub fn push_cloud_sync(trigger_reason: Option<String>) -> Result<crate::cloud_sync::CloudSyncPushResponse, String> {
     let reason = trigger_reason.unwrap_or_else(|| "MANUAL".to_string());
-    let client = crate::cloud_sync::CloudSyncClient::new(crate::cloud_sync::DEFAULT_CLOUD_ENDPOINT, "POS-01");
+    let client = crate::cloud_sync::CloudSyncClient::from_config();
     client.push_events(&reason)
 }
 
 #[tauri::command]
 pub fn trigger_cloud_sync(trigger_reason: Option<String>) -> Result<crate::cloud_sync::CloudSyncPushResponse, String> {
     let reason = trigger_reason.unwrap_or_else(|| "MANUAL_CLOUD_SYNC".to_string());
-    let client = crate::cloud_sync::CloudSyncClient::new(crate::cloud_sync::DEFAULT_CLOUD_ENDPOINT, "POS-01");
-    client.push_events(&reason)
+    let client = crate::cloud_sync::CloudSyncClient::from_config();
+    client.sync_bidirectional(&reason)
+}
+
+#[tauri::command]
+pub fn get_cloud_sync_settings() -> Result<crate::cloud_sync::CloudSyncSettingsDto, String> {
+    let cfg = ConfigManager::new().load_or_create();
+    Ok(crate::cloud_sync::CloudSyncSettingsDto {
+        cloud_sync_enabled: cfg.cloud_sync_enabled,
+        cloud_api_url: cfg.cloud_api_url,
+        cloud_api_token: cfg.cloud_api_token,
+        cloud_auto_sync_minutes: cfg.cloud_auto_sync_minutes,
+        cloud_last_synced_at: cfg.cloud_last_synced_at,
+        station_id: cfg.station_id,
+    })
+}
+
+#[tauri::command]
+pub fn save_cloud_sync_settings(
+    cloud_sync_enabled: bool,
+    cloud_api_url: String,
+    cloud_api_token: String,
+    cloud_auto_sync_minutes: u32,
+) -> Result<crate::cloud_sync::CloudSyncSettingsDto, String> {
+    let mgr = ConfigManager::new();
+    let mut cfg = mgr.load_or_create();
+    cfg.cloud_sync_enabled = cloud_sync_enabled;
+    cfg.cloud_api_url = cloud_api_url.trim().trim_end_matches('/').to_string();
+    cfg.cloud_api_token = cloud_api_token.trim().to_string();
+    cfg.cloud_auto_sync_minutes = cloud_auto_sync_minutes.clamp(1, 120);
+    mgr.save(&cfg).map_err(|e| format!("Failed to save cloud settings: {}", e))?;
+    Ok(crate::cloud_sync::CloudSyncSettingsDto {
+        cloud_sync_enabled: cfg.cloud_sync_enabled,
+        cloud_api_url: cfg.cloud_api_url,
+        cloud_api_token: cfg.cloud_api_token,
+        cloud_auto_sync_minutes: cfg.cloud_auto_sync_minutes,
+        cloud_last_synced_at: cfg.cloud_last_synced_at,
+        station_id: cfg.station_id,
+    })
+}
+
+#[tauri::command]
+pub fn test_cloud_connection() -> Result<crate::cloud_sync::CloudSyncStatusResponse, String> {
+    let client = crate::cloud_sync::CloudSyncClient::from_config();
+    client.test_connection()
+}
+
+#[tauri::command]
+pub fn trigger_full_cloud_snapshot_sync() -> Result<crate::cloud_sync::CloudSyncPushResponse, String> {
+    let cfg = ConfigManager::new().load_or_create();
+    let db = DatabaseManager::new();
+    let queued = db.queue_full_cloud_sync_snapshot(&cfg.station_id)?;
+    let client = crate::cloud_sync::CloudSyncClient::from_config();
+    let mut res = client.sync_bidirectional("FULL_SNAPSHOT_SYNC")?;
+    if res.processed_events_count == 0 && queued > 0 {
+        res.message = format!("Queued {} historical record(s); {}", queued, res.message);
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn upload_cloud_backup() -> Result<crate::cloud_sync::CloudBackupUploadResponse, String> {
+    let db = DatabaseManager::new();
+    let backup = db.create_hot_backup(None)?;
+    let client = crate::cloud_sync::CloudSyncClient::from_config();
+    client.upload_backup_file(&backup.record.file_path, &backup.record.sha256_checksum)
 }
 
 // ============================================================================
@@ -1151,17 +1227,24 @@ pub fn enable_windows_lan_sharing() -> Result<String, String> {
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn set_terminal_blocked_status(
+    caller_user_id: Option<String>,
+    callerUserId: Option<String>,
     terminal_id: Option<String>,
     terminalId: Option<String>,
     is_blocked: Option<bool>,
     isBlocked: Option<bool>,
     reason: Option<String>,
 ) -> Result<bool, String> {
+    let caller = caller_user_id
+        .or(callerUserId)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Access Denied: Authenticated Super Admin session required.".to_string())?;
     let tid = terminal_id.or(terminalId).unwrap_or_else(|| "POS-02".to_string());
     let blocked = is_blocked.or(isBlocked).unwrap_or(true);
     let r = reason.unwrap_or_else(|| "PC-2 database access revoked by Admin".to_string());
     let db = DatabaseManager::new();
-    db.set_terminal_blocked_status(&tid, blocked, &r)
+    db.set_terminal_blocked_status(&caller, &tid, blocked, &r)
 }
 
 #[tauri::command]

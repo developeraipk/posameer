@@ -365,10 +365,6 @@ export async function deleteProduct(productId: string): Promise<boolean> {
   return safeInvoke<boolean>("delete_product", { productId, product_id: productId }, true);
 }
 
-export async function clearAllProducts(): Promise<boolean> {
-  return safeInvoke<boolean>("clear_all_products", undefined, true);
-}
-
 export async function searchProductByBarcode(code: string): Promise<FinishedProduct | null> {
   const cleanCode = code.trim().toLowerCase();
   const browserFallback = fallbackProducts.find(
@@ -873,14 +869,6 @@ export async function deleteAttar(attarId: string): Promise<boolean> {
   return safeInvoke<boolean>("delete_attar", { attarId, attar_id: attarId }, true);
 }
 
-export async function clearAllAttars(): Promise<boolean> {
-  return safeInvoke<boolean>("clear_all_attars", undefined, true);
-}
-
-export async function resetDatabaseForTesting(): Promise<string> {
-  return safeInvoke("reset_database_for_testing", undefined, "Database reset complete.");
-}
-
 // ----------------------------------------------------------------------------
 // Milestone 9: Shift Reconciliation & Petty Expenses IPC Functions
 // ----------------------------------------------------------------------------
@@ -1362,6 +1350,97 @@ export async function triggerCloudSync(triggerReason?: string): Promise<CloudSyn
   return safeInvoke("trigger_cloud_sync", { triggerReason }, fallback);
 }
 
+export interface CloudSyncSettings {
+  cloud_sync_enabled: boolean;
+  cloud_api_url: string;
+  cloud_api_token: string;
+  cloud_auto_sync_minutes: number;
+  cloud_last_synced_at: string | null;
+  station_id: string;
+}
+
+export interface CloudSyncStatusResult {
+  cloud_service: string;
+  database: string;
+  total_events_archived: number;
+  sync_cadence: string;
+  is_online: boolean;
+  message: string;
+  server_timestamp: string;
+}
+
+export interface CloudBackupUploadResult {
+  success: boolean;
+  backup_id: string;
+  filename: string;
+  file_size_bytes: number;
+  sha256_checksum: string;
+  server_timestamp: string;
+  message: string;
+}
+
+export async function getCloudSyncSettings(): Promise<CloudSyncSettings> {
+  return safeInvoke("get_cloud_sync_settings", undefined, {
+    cloud_sync_enabled: true,
+    cloud_api_url: "",
+    cloud_api_token: "",
+    cloud_auto_sync_minutes: 5,
+    cloud_last_synced_at: null,
+    station_id: "POS-01",
+  });
+}
+
+export async function saveCloudSyncSettings(params: {
+  cloudSyncEnabled: boolean;
+  cloudApiUrl: string;
+  cloudApiToken: string;
+  cloudAutoSyncMinutes: number;
+}): Promise<CloudSyncSettings> {
+  return safeInvoke("save_cloud_sync_settings", params, {
+    cloud_sync_enabled: params.cloudSyncEnabled,
+    cloud_api_url: params.cloudApiUrl,
+    cloud_api_token: params.cloudApiToken,
+    cloud_auto_sync_minutes: params.cloudAutoSyncMinutes,
+    cloud_last_synced_at: null,
+    station_id: "POS-01",
+  });
+}
+
+export async function testCloudConnection(): Promise<CloudSyncStatusResult> {
+  return safeInvoke("test_cloud_connection", undefined, {
+    cloud_service: "Hostinger Shared MySQL + PHP",
+    database: "MySQL",
+    total_events_archived: 0,
+    sync_cadence: "Auto",
+    is_online: false,
+    message: "Configure Hostinger URL and Bearer token inside Desktop EXE.",
+    server_timestamp: new Date().toISOString(),
+  });
+}
+
+export async function triggerFullCloudSnapshotSync(): Promise<CloudSyncPushResult> {
+  return safeInvoke("trigger_full_cloud_snapshot_sync", undefined, {
+    success: true,
+    terminal_id: "POS-01",
+    processed_events_count: 0,
+    acknowledged_watermark: 0,
+    server_timestamp: new Date().toISOString(),
+    message: "Full shop cloud snapshot upload queued.",
+  });
+}
+
+export async function uploadCloudBackup(): Promise<CloudBackupUploadResult> {
+  return safeInvoke("upload_cloud_backup", undefined, {
+    success: true,
+    backup_id: "bkp_dev",
+    filename: "ameer_pos_backup.db",
+    file_size_bytes: 0,
+    sha256_checksum: "",
+    server_timestamp: new Date().toISOString(),
+    message: "Cloud SQLite backup upload ready inside Desktop EXE.",
+  });
+}
+
 export interface PhysicalPrinterResult {
   success: boolean;
   printer_name: string;
@@ -1487,11 +1566,14 @@ export async function enableWindowsLanSharing(): Promise<string> {
 export async function setTerminalBlockedStatus(
   terminalId: string,
   isBlocked: boolean,
-  reason?: string
+  reason?: string,
+  callerUserId?: string
 ): Promise<boolean> {
   return safeInvoke<boolean>(
     "set_terminal_blocked_status",
     {
+      caller_user_id: callerUserId || "",
+      callerUserId: callerUserId || "",
       terminal_id: terminalId,
       terminalId,
       is_blocked: isBlocked,

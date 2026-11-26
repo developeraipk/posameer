@@ -199,7 +199,7 @@ fn default_payment_method() -> String { "CASH".to_string() }
 
 fn default_customer_phone() -> String { "0300-0000000".to_string() }
 fn default_salesperson_id() -> String { "sp_01".to_string() }
-fn default_cashier_id() -> String { "usr_ibrar".to_string() }
+fn default_cashier_id() -> String { "usr_admin".to_string() }
 fn default_terminal_id() -> String { "POS-01".to_string() }
 fn default_order_source() -> String { "WALK_IN".to_string() }
 
@@ -529,8 +529,18 @@ impl DatabaseManager {
         (false, String::new())
     }
 
-    pub fn set_terminal_blocked_status(&self, terminal_id: &str, is_blocked: bool, reason: &str) -> Result<bool, String> {
+    pub fn set_terminal_blocked_status(&self, caller_user_id: &str, terminal_id: &str, is_blocked: bool, reason: &str) -> Result<bool, String> {
         let conn = self.get_connection().map_err(|e| e.to_string())?;
+        let caller_role: String = conn.query_row(
+            "SELECT role FROM users WHERE user_id = ? AND is_active = 1;",
+            [caller_user_id],
+            |r| r.get(0)
+        ).map_err(|_| "Access Denied: Caller account not found or deactivated.".to_string())?;
+
+        if caller_role != "SUPER_ADMIN" {
+            return Err("SECURITY VIOLATION: Only Super Admin is authorized to block or unblock terminals.".to_string());
+        }
+
         let _ = self.ensure_access_control_table();
         let now_str = chrono::Utc::now().to_rfc3339();
         let blocked_at = if is_blocked { Some(now_str.clone()) } else { None };
@@ -706,61 +716,78 @@ impl DatabaseManager {
             );
         ", []);
 
-        // Upgrade wholesale_payments table to support EASYPAISA, JAZZCASH, etc.
-        let _ = conn.execute_batch("
-            PRAGMA foreign_keys = OFF;
-            CREATE TABLE IF NOT EXISTS wholesale_payments_upgraded (
-                wholesale_payment_id TEXT PRIMARY KEY NOT NULL,
-                customer_id TEXT NOT NULL,
-                wholesale_invoice_id TEXT,
-                payment_date TEXT NOT NULL,
-                payment_method TEXT NOT NULL CHECK(payment_method IN ('CASH', 'EASYPAISA', 'JAZZCASH', 'BANK_TRANSFER', 'CHEQUE', 'DIGITAL_WALLET', 'BANK')),
-                amount_paid_paisa INTEGER NOT NULL CHECK(amount_paid_paisa > 0),
-                reference_number TEXT,
-                received_by_account_id TEXT NOT NULL,
-                notes TEXT,
-                received_by_user_id TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO wholesale_payments_upgraded 
-            SELECT wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at 
-            FROM wholesale_payments;
-            DROP TABLE IF EXISTS wholesale_payments;
-            ALTER TABLE wholesale_payments_upgraded RENAME TO wholesale_payments;
-            CREATE INDEX IF NOT EXISTS idx_wp_customer ON wholesale_payments(customer_id);
-            CREATE INDEX IF NOT EXISTS idx_wp_invoice ON wholesale_payments(wholesale_invoice_id);
-            CREATE INDEX IF NOT EXISTS idx_wp_date ON wholesale_payments(payment_date);
+        // Upgrade wholesale_payments and return_vouchers only if legacy constraints lack EASYPAISA
+        let wp_ddl: String = conn.query_row(
+            "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='wholesale_payments';",
+            [],
+            |r| r.get(0)
+        ).unwrap_or_default();
+        if !wp_ddl.contains("EASYPAISA") {
+            let _ = conn.execute_batch("
+                PRAGMA foreign_keys = OFF;
+                CREATE TABLE IF NOT EXISTS wholesale_payments_upgraded (
+                    wholesale_payment_id TEXT PRIMARY KEY NOT NULL,
+                    customer_id TEXT NOT NULL REFERENCES wholesale_customers(customer_id) ON DELETE RESTRICT,
+                    wholesale_invoice_id TEXT REFERENCES wholesale_invoices(wholesale_invoice_id) ON DELETE RESTRICT,
+                    payment_date TEXT NOT NULL,
+                    payment_method TEXT NOT NULL CHECK(payment_method IN ('CASH', 'EASYPAISA', 'JAZZCASH', 'BANK_TRANSFER', 'CHEQUE', 'DIGITAL_WALLET', 'BANK')),
+                    amount_paid_paisa INTEGER NOT NULL CHECK(amount_paid_paisa > 0),
+                    reference_number TEXT,
+                    received_by_account_id TEXT NOT NULL REFERENCES chart_of_accounts(account_id) ON DELETE RESTRICT,
+                    notes TEXT,
+                    received_by_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+                    created_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO wholesale_payments_upgraded 
+                SELECT wholesale_payment_id, customer_id, wholesale_invoice_id, payment_date, payment_method, amount_paid_paisa, reference_number, received_by_account_id, notes, received_by_user_id, created_at 
+                FROM wholesale_payments;
+                DROP TABLE IF EXISTS wholesale_payments;
+                ALTER TABLE wholesale_payments_upgraded RENAME TO wholesale_payments;
+                CREATE INDEX IF NOT EXISTS idx_wp_customer ON wholesale_payments(customer_id);
+                CREATE INDEX IF NOT EXISTS idx_wp_invoice ON wholesale_payments(wholesale_invoice_id);
+                CREATE INDEX IF NOT EXISTS idx_wp_date ON wholesale_payments(payment_date);
+                PRAGMA foreign_keys = ON;
+            ");
+        }
 
-            -- Upgrade return_vouchers to support EASYPAISA, JAZZCASH, etc.
-            CREATE TABLE IF NOT EXISTS return_vouchers_upgraded (
-                return_id TEXT PRIMARY KEY NOT NULL,
-                return_voucher_number TEXT UNIQUE NOT NULL,
-                original_sales_invoice_id TEXT REFERENCES sales_invoices(invoice_id) ON DELETE RESTRICT,
-                original_wholesale_invoice_id TEXT REFERENCES wholesale_invoices(wholesale_invoice_id) ON DELETE RESTRICT,
-                invoice_type TEXT NOT NULL CHECK(invoice_type IN ('RETAIL', 'WHOLESALE')),
-                customer_id TEXT REFERENCES wholesale_customers(customer_id) ON DELETE RESTRICT,
-                return_type TEXT NOT NULL CHECK(return_type IN ('FULL_REFUND', 'EXCHANGE')),
-                condition_status TEXT NOT NULL CHECK(condition_status IN ('UNDAMAGED_NORMAL', 'DAMAGED_RUINED')),
-                total_refund_amount_paisa INTEGER NOT NULL CHECK(total_refund_amount_paisa >= 0),
-                refund_settlement_method TEXT NOT NULL CHECK(refund_settlement_method IN ('CASH', 'EASYPAISA', 'JAZZCASH', 'BANK_TRANSFER', 'CUSTOMER_CREDIT', 'EXCHANGE_OFFSET')),
-                replacement_invoice_id TEXT REFERENCES sales_invoices(invoice_id) ON DELETE RESTRICT,
-                exchange_price_difference_paisa INTEGER NOT NULL DEFAULT 0,
-                cashier_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
-                terminal_id TEXT NOT NULL,
-                return_date TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO return_vouchers_upgraded 
-            SELECT return_id, return_voucher_number, original_sales_invoice_id, original_wholesale_invoice_id, invoice_type, customer_id, return_type, condition_status, total_refund_amount_paisa, refund_settlement_method, replacement_invoice_id, exchange_price_difference_paisa, cashier_user_id, terminal_id, return_date, created_at 
-            FROM return_vouchers;
-            DROP TABLE IF EXISTS return_vouchers;
-            ALTER TABLE return_vouchers_upgraded RENAME TO return_vouchers;
-            CREATE INDEX IF NOT EXISTS idx_rv_date ON return_vouchers(return_date);
-            CREATE INDEX IF NOT EXISTS idx_rv_sales_inv ON return_vouchers(original_sales_invoice_id);
-            CREATE INDEX IF NOT EXISTS idx_rv_wholesale_inv ON return_vouchers(original_wholesale_invoice_id);
-            CREATE INDEX IF NOT EXISTS idx_rv_type ON return_vouchers(return_type);
-            PRAGMA foreign_keys = ON;
-        ");
+        let rv_ddl: String = conn.query_row(
+            "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type='table' AND name='return_vouchers';",
+            [],
+            |r| r.get(0)
+        ).unwrap_or_default();
+        if !rv_ddl.contains("EASYPAISA") {
+            let _ = conn.execute_batch("
+                PRAGMA foreign_keys = OFF;
+                CREATE TABLE IF NOT EXISTS return_vouchers_upgraded (
+                    return_id TEXT PRIMARY KEY NOT NULL,
+                    return_voucher_number TEXT UNIQUE NOT NULL,
+                    original_sales_invoice_id TEXT REFERENCES sales_invoices(invoice_id) ON DELETE RESTRICT,
+                    original_wholesale_invoice_id TEXT REFERENCES wholesale_invoices(wholesale_invoice_id) ON DELETE RESTRICT,
+                    invoice_type TEXT NOT NULL CHECK(invoice_type IN ('RETAIL', 'WHOLESALE')),
+                    customer_id TEXT REFERENCES wholesale_customers(customer_id) ON DELETE RESTRICT,
+                    return_type TEXT NOT NULL CHECK(return_type IN ('FULL_REFUND', 'EXCHANGE')),
+                    condition_status TEXT NOT NULL CHECK(condition_status IN ('UNDAMAGED_NORMAL', 'DAMAGED_RUINED')),
+                    total_refund_amount_paisa INTEGER NOT NULL CHECK(total_refund_amount_paisa >= 0),
+                    refund_settlement_method TEXT NOT NULL CHECK(refund_settlement_method IN ('CASH', 'EASYPAISA', 'JAZZCASH', 'BANK_TRANSFER', 'CUSTOMER_CREDIT', 'EXCHANGE_OFFSET')),
+                    replacement_invoice_id TEXT REFERENCES sales_invoices(invoice_id) ON DELETE RESTRICT,
+                    exchange_price_difference_paisa INTEGER NOT NULL DEFAULT 0,
+                    cashier_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE RESTRICT,
+                    terminal_id TEXT NOT NULL,
+                    return_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO return_vouchers_upgraded 
+                SELECT return_id, return_voucher_number, original_sales_invoice_id, original_wholesale_invoice_id, invoice_type, customer_id, return_type, condition_status, total_refund_amount_paisa, refund_settlement_method, replacement_invoice_id, exchange_price_difference_paisa, cashier_user_id, terminal_id, return_date, created_at 
+                FROM return_vouchers;
+                DROP TABLE IF EXISTS return_vouchers;
+                ALTER TABLE return_vouchers_upgraded RENAME TO return_vouchers;
+                CREATE INDEX IF NOT EXISTS idx_rv_date ON return_vouchers(return_date);
+                CREATE INDEX IF NOT EXISTS idx_rv_sales_inv ON return_vouchers(original_sales_invoice_id);
+                CREATE INDEX IF NOT EXISTS idx_rv_wholesale_inv ON return_vouchers(original_wholesale_invoice_id);
+                CREATE INDEX IF NOT EXISTS idx_rv_type ON return_vouchers(return_type);
+                PRAGMA foreign_keys = ON;
+            ");
+        }
 
         // Guarantee default system users exist (especially on fresh install on 2nd laptop)
         let _ = Self::ensure_default_users(&conn);
@@ -849,45 +876,40 @@ impl DatabaseManager {
             WHERE order_id IN (SELECT order_id FROM online_order_payments);
         ", []);
 
-        let _ = conn.execute("
-            UPDATE online_orders
-            SET subtotal_paisa = 430000,
-                discount_paisa = 30000,
-                total_amount_paisa = 400000
-            WHERE discount_paisa = 0 AND items_json LIKE '%DEAL 1%';
-        ", []);
-
-        let _ = conn.execute("
-            UPDATE online_orders
-            SET subtotal_paisa = 130000,
-                discount_paisa = 0,
-                total_amount_paisa = 130000
-            WHERE order_number = 'WEB-20261125-0001' AND delivery_status = 'PARTIAL_RETURN';
-        ", []);
-
         Ok((current_version.max(231), current_version < 231))
     }
 
     pub fn ensure_default_users(conn: &Connection) -> Result<(), rusqlite::Error> {
-        let ibrar_pin_hash = crate::crypto::generate_salted_pin_hash("7321", Some("ameer_ibrar_pin_salt"));
-        let ibrar_pwd_hash = crate::crypto::generate_salted_pin_hash("Ibrarkhan732", Some("ameer_ibrar_pwd_salt"));
         let now_str = chrono::Utc::now().to_rfc3339();
 
-        // 1. Primary Default Super Admin (ibrarkhanlk / Ibrarkhan732 / PIN 7321)
-        // INSERT OR IGNORE ensures fresh installs get Super Admin, but user changes to full name, username, PIN, or password are NEVER overwritten!
+        // Deactivate legacy personal developer account if still present with its original username
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO users (user_id, username, password_hash, pin_salt_hash, full_name, role, is_active, created_at, updated_at)
-            VALUES ('usr_ibrar', 'ibrarkhanlk', ?, ?, 'M Ibrar Khan (Super Admin)', 'SUPER_ADMIN', 1, ?, ?);",
-            rusqlite::params![ibrar_pwd_hash, ibrar_pin_hash, now_str, now_str],
+            "UPDATE users SET is_active = 0, updated_at = ? WHERE user_id = 'usr_ibrar' AND LOWER(username) = 'ibrarkhanlk';",
+            [&now_str],
         );
 
-        // 2. Remove all dummy default users & roles (admin, cashier, owner, manager) so only ibrarkhanlk exists by default
-        let _ = conn.execute(
-            "DELETE FROM users WHERE username IN ('admin', 'cashier', 'cashier1', 'owner', 'manager') AND user_id IN ('usr_admin', 'usr_cashier1', 'usr_owner', 'usr_manager');",
+        // Seed generic Super Admin (admin / admin123 / PIN 1111) only if no active SUPER_ADMIN exists
+        let active_admins: i64 = conn.query_row(
+            "SELECT count(*) FROM users WHERE role = 'SUPER_ADMIN' AND is_active = 1;",
             [],
-        );
+            |r| r.get(0),
+        ).unwrap_or(0);
 
-        // 3. Ensure default showroom sales staff exists for bill receipts
+        if active_admins == 0 {
+            let admin_pin_hash = crate::crypto::generate_salted_pin_hash("1111", None);
+            let admin_pwd_hash = crate::crypto::generate_salted_pin_hash("admin123", None);
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, username, password_hash, pin_salt_hash, full_name, role, is_active, created_at, updated_at)
+                VALUES ('usr_admin', 'admin', ?, ?, 'System Super Admin', 'SUPER_ADMIN', 1, ?, ?);",
+                rusqlite::params![admin_pwd_hash, admin_pin_hash, now_str, now_str],
+            );
+            let _ = conn.execute(
+                "UPDATE users SET is_active = 1, role = 'SUPER_ADMIN', updated_at = ? WHERE user_id = 'usr_admin';",
+                [&now_str],
+            );
+        }
+
+        // Ensure default showroom sales staff exists for bill receipts
         let _ = conn.execute(
             "INSERT OR IGNORE INTO salespersons (salesperson_id, employee_code, full_name, phone, is_active, created_at, updated_at)
             VALUES ('sp_01', 'EMP-101', 'Showroom Sales Staff', '0300-0000000', 1, ?, ?);",
@@ -993,16 +1015,15 @@ impl DatabaseManager {
         crate::crypto::check_rate_limit()?;
         let conn = self.get_connection().map_err(|e| e.to_string())?;
 
-        // Authenticate against database by username or full name
-        let like_name = format!("%{}%", clean_uname);
+        // Authenticate against database strictly by exact username
         let mut stmt = conn.prepare(
             "SELECT user_id, username, full_name, role, is_active, password_hash, pin_salt_hash 
              FROM users 
-             WHERE (LOWER(username) = ? OR LOWER(full_name) = ? OR LOWER(full_name) LIKE ?) AND is_active = 1
+             WHERE LOWER(username) = ? AND is_active = 1
              LIMIT 1;"
         ).map_err(|e| e.to_string())?;
 
-        let res = stmt.query_row(rusqlite::params![clean_uname, clean_uname, like_name], |r| {
+        let res = stmt.query_row(rusqlite::params![clean_uname], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1078,19 +1099,12 @@ impl DatabaseManager {
     ) -> Result<bool, String> {
         let conn = self.get_connection().map_err(|e| e.to_string())?;
 
-        // 1. Enforce Super Admin authorization
+        // 1. Strictly enforce Super Admin authorization against active authenticated caller
         let caller_role: String = conn.query_row(
             "SELECT role FROM users WHERE user_id = ? AND is_active = 1;",
             [caller_user_id],
             |r| r.get(0)
-        ).or_else(|_| {
-            if caller_user_id == "usr_ibrar" || caller_user_id == "usr_admin" {
-                Ok("SUPER_ADMIN".to_string())
-            } else {
-                // If caller user id was changed or session reloaded, check if any active SUPER_ADMIN exists
-                conn.query_row("SELECT role FROM users WHERE role = 'SUPER_ADMIN' AND is_active = 1 LIMIT 1;", [], |r| r.get(0))
-            }
-        }).map_err(|_| "Access Denied: Caller account not found or deactivated.".to_string())?;
+        ).map_err(|_| "Access Denied: Caller account not found or deactivated.".to_string())?;
 
         if caller_role != "SUPER_ADMIN" {
             return Err("SECURITY VIOLATION: Only Super Admin is authorized to change staff PINs and passwords.".to_string());
@@ -1546,10 +1560,15 @@ impl DatabaseManager {
         if payload.initial_stock_units > 0 {
             let mov_id = format!("sm_init_{}", chrono::Utc::now().timestamp_millis());
             let setup_ref = format!("setup_{}", product_id);
+            let auth_user_id: String = tx.query_row(
+                "SELECT user_id FROM users WHERE is_active = 1 AND role != 'OWNER' ORDER BY CASE role WHEN 'SUPER_ADMIN' THEN 0 ELSE 1 END LIMIT 1;",
+                [],
+                |r| r.get(0),
+            ).unwrap_or_else(|_| "usr_admin".to_string());
             tx.execute(
                 "INSERT INTO stock_movements 
                 (movement_id, entity_type, material_id, finished_product_id, batch_id, movement_type, delta_quantity, unit_cost_paisa, running_balance_after, reference_document_type, reference_document_id, shortage_oversell_flag, notes, authorized_by_user_id, occurred_at, created_at)
-                VALUES (?, 'FINISHED_PERFUME', NULL, ?, NULL, 'OPENING_STOCK', ?, ?, ?, 'INITIAL_SETUP', ?, 0, 'Initial catalog inventory setup', 'usr_ibrar', ?, ?);",
+                VALUES (?, 'FINISHED_PERFUME', NULL, ?, NULL, 'OPENING_STOCK', ?, ?, ?, 'INITIAL_SETUP', ?, 0, 'Initial catalog inventory setup', ?, ?, ?);",
                 rusqlite::params![
                     mov_id,
                     product_id,
@@ -1557,13 +1576,17 @@ impl DatabaseManager {
                     payload.unit_cost_paisa,
                     payload.initial_stock_units,
                     setup_ref,
+                    auth_user_id,
                     now,
                     now
                 ]
             ).map_err(|e| format!("Failed to log initial stock movement: {}", e))?;
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "FINISHED_PRODUCT", &product_id, "INSERT");
+
         tx.commit().map_err(|e| e.to_string())?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(ProductDto {
             product_id,
@@ -1629,6 +1652,9 @@ impl DatabaseManager {
             ]
         ).map_err(|e| format!("Failed to update perfume: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "FINISHED_PRODUCT", &payload.product_id, "UPDATE");
+        crate::cloud_sync::spawn_realtime_push();
+
         let p = self.get_product_by_id(&payload.product_id)?
             .ok_or_else(|| "Product not found after update".to_string())?;
         Ok(p)
@@ -1670,49 +1696,9 @@ impl DatabaseManager {
             tx.execute("DELETE FROM finished_products WHERE product_id = ?;", [product_id])
                 .map_err(|e| format!("Failed to delete product: {}", e))?;
         }
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "FINISHED_PRODUCT", product_id, "DELETE");
         tx.commit().map_err(|e| e.to_string())?;
-        Ok(true)
-    }
-
-    pub fn clear_all_products(&self) -> Result<bool, String> {
-        let mut conn = self.get_connection().map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-
-        let prods: Vec<String> = {
-            let mut stmt = tx.prepare("SELECT product_id FROM finished_products;").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        for pid in prods {
-            let sales_count: i64 = tx.query_row(
-                "SELECT count(*) FROM sales_invoice_items WHERE finished_product_id = ?;",
-                [&pid],
-                |r| r.get(0)
-            ).unwrap_or(0);
-
-            if sales_count > 0 {
-                tx.execute(
-                    "UPDATE finished_products SET is_active = 0, current_stock_units = 0 WHERE product_id = ?;",
-                    [&pid]
-                ).ok();
-            } else {
-                let _ = tx.execute_batch("DROP TRIGGER IF EXISTS trg_prevent_stock_movement_deletion;");
-                tx.execute("DELETE FROM stock_movements WHERE finished_product_id = ?;", [&pid]).ok();
-                let _ = tx.execute_batch("
-                    CREATE TRIGGER IF NOT EXISTS trg_prevent_stock_movement_deletion
-                    BEFORE DELETE ON stock_movements
-                    BEGIN
-                        SELECT RAISE(ABORT, 'CRITICAL ERROR: Deleting stock movements is strictly prohibited.');
-                    END;
-                ");
-                tx.execute("DELETE FROM perfume_recipe_items WHERE recipe_id IN (SELECT recipe_id FROM perfume_recipes WHERE finished_product_id = ?);", [&pid]).ok();
-                tx.execute("DELETE FROM perfume_recipes WHERE finished_product_id = ?;", [&pid]).ok();
-                tx.execute("DELETE FROM finished_products WHERE product_id = ?;", [&pid]).ok();
-            }
-        }
-
-        tx.commit().map_err(|e| e.to_string())?;
+        crate::cloud_sync::spawn_realtime_push();
         Ok(true)
     }
 
@@ -1889,10 +1875,10 @@ impl DatabaseManager {
                 } else {
                     let auto_shift_id = format!("shift_{}_{}", payload.terminal_id.to_lowercase().replace('-', "_"), chrono::Utc::now().timestamp_millis());
                     let shift_cashier = tx.query_row(
-                        "SELECT user_id FROM users WHERE role != 'OWNER' ORDER BY role ASC LIMIT 1;",
+                        "SELECT user_id FROM users WHERE is_active = 1 AND role != 'OWNER' ORDER BY role ASC LIMIT 1;",
                         [],
                         |r| r.get(0)
-                    ).unwrap_or_else(|_| "usr_ibrar".to_string());
+                    ).unwrap_or_else(|_| "usr_admin".to_string());
 
                     tx.execute(
                         "INSERT OR IGNORE INTO cash_register_shifts
@@ -1941,10 +1927,10 @@ impl DatabaseManager {
             payload.cashier_user_id.clone()
         } else {
             tx.query_row(
-                "SELECT user_id FROM users WHERE role != 'OWNER' ORDER BY role ASC LIMIT 1;",
+                "SELECT user_id FROM users WHERE is_active = 1 AND role != 'OWNER' ORDER BY role ASC LIMIT 1;",
                 [],
                 |r| r.get(0)
-            ).unwrap_or_else(|_| "usr_ibrar".to_string())
+            ).unwrap_or_else(|_| "usr_admin".to_string())
         };
 
         // 4. Safely map order_source
@@ -2175,7 +2161,7 @@ impl DatabaseManager {
                         balance_after,
                         invoice_id,
                         sm_note,
-                        payload.cashier_user_id,
+                        verified_cashier_id,
                         now,
                         now
                     ]
@@ -2240,13 +2226,24 @@ impl DatabaseManager {
                     p.amount_paisa,
                     ref_code,
                     is_drawer,
-                    payload.cashier_user_id,
+                    verified_cashier_id,
                     now
                 ]
             ).map_err(|e| format!("Failed to insert invoice payment: {}", e))?;
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &payload.terminal_id, "SALES_INVOICE", &invoice_id, "INSERT");
+        Self::enqueue_related_snapshots(
+            &*tx,
+            &payload.terminal_id,
+            "FINISHED_PRODUCT",
+            "UPDATE",
+            "SELECT DISTINCT finished_product_id FROM sales_invoice_items WHERE invoice_id = ? AND finished_product_id IS NOT NULL;",
+            &invoice_id,
+        );
+
         tx.commit().map_err(|e| format!("Failed to commit invoice transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         let change_due = if total_paid > payload.net_payable_paisa {
             total_paid - payload.net_payable_paisa
@@ -2652,8 +2649,8 @@ impl DatabaseManager {
             [&payload.cashier_user_id, &payload.cashier_user_id],
             |r| r.get(0)
         ).or_else(|_| {
-            tx.query_row("SELECT user_id FROM users WHERE role IN ('SUPER_ADMIN', 'ADMIN', 'OWNER') LIMIT 1;", [], |r| r.get(0))
-        }).unwrap_or_else(|_| "usr_ibrar".to_string());
+            tx.query_row("SELECT user_id FROM users WHERE is_active = 1 AND role IN ('SUPER_ADMIN', 'ADMIN', 'OWNER') LIMIT 1;", [], |r| r.get(0))
+        }).unwrap_or_else(|_| "usr_admin".to_string());
 
         // Insert return voucher
         tx.execute(
@@ -2891,7 +2888,18 @@ impl DatabaseManager {
             );
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &payload.terminal_id, "RETURN_VOUCHER", &return_id, "INSERT");
+        Self::enqueue_related_snapshots(
+            &*tx,
+            &payload.terminal_id,
+            "FINISHED_PRODUCT",
+            "UPDATE",
+            "SELECT DISTINCT sii.finished_product_id FROM return_voucher_items rvi JOIN sales_invoice_items sii ON rvi.original_retail_item_id = sii.invoice_item_id WHERE rvi.return_id = ? AND sii.finished_product_id IS NOT NULL;",
+            &return_id,
+        );
+
         tx.commit().map_err(|e| format!("Failed to commit return transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(ReturnVoucherResultDto {
             success: true,
@@ -3923,7 +3931,10 @@ impl DatabaseManager {
             ]
         ).map_err(|e| format!("Failed to record finished perfume output stock movement: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "FINISHED_PRODUCT", &finished_product_id, "UPDATE");
+
         tx.commit().map_err(|e| format!("Failed to commit manufacturing release transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         let evaporation_loss_units = planned_units - payload.produced_units;
 
@@ -4247,6 +4258,9 @@ impl DatabaseManager {
             ]
         ).map_err(|e| format!("Failed to create wholesale customer: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "WHOLESALE_CUSTOMER", &cust_id, "INSERT");
+        crate::cloud_sync::spawn_realtime_push();
+
         Ok(WholesaleCustomerDto {
             customer_id: cust_id,
             business_name: payload.business_name.trim().to_string(),
@@ -4276,6 +4290,9 @@ impl DatabaseManager {
                 payload.customer_id
             ]
         ).map_err(|e| format!("Failed to update wholesale customer: {}", e))?;
+
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "WHOLESALE_CUSTOMER", &payload.customer_id, "UPDATE");
+        crate::cloud_sync::spawn_realtime_push();
 
         let row = conn.query_row(
             "SELECT customer_id, business_name, contact_person, phone, city, credit_limit_paisa, current_balance_paisa, is_active
@@ -4740,7 +4757,20 @@ impl DatabaseManager {
             rusqlite::params![final_cust_bal, now, payload.customer_id]
         ).map_err(|e| format!("Failed to update wholesale customer balance: {}", e))?;
 
+        let station_id = Self::active_station_id();
+        Self::enqueue_entity_snapshot(&*tx, &station_id, "WHOLESALE_INVOICE", &inv_id, "INSERT");
+        Self::enqueue_entity_snapshot(&*tx, &station_id, "WHOLESALE_CUSTOMER", &payload.customer_id, "UPDATE");
+        Self::enqueue_related_snapshots(
+            &*tx,
+            &station_id,
+            "FINISHED_PRODUCT",
+            "UPDATE",
+            "SELECT DISTINCT finished_product_id FROM wholesale_invoice_items WHERE wholesale_invoice_id = ? AND finished_product_id IS NOT NULL;",
+            &inv_id,
+        );
+
         tx.commit().map_err(|e| format!("Failed to commit wholesale invoice transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(WholesaleInvoiceResultDto {
             success: true,
@@ -4887,7 +4917,19 @@ impl DatabaseManager {
             rusqlite::params![new_bal, now, payload.customer_id]
         ).map_err(|e| format!("Failed to update customer balance: {}", e))?;
 
+        let station_id = Self::active_station_id();
+        Self::enqueue_entity_snapshot(&*tx, &station_id, "WHOLESALE_CUSTOMER", &payload.customer_id, "UPDATE");
+        Self::enqueue_related_snapshots(
+            &*tx,
+            &station_id,
+            "WHOLESALE_INVOICE",
+            "UPDATE",
+            "SELECT wholesale_invoice_id FROM wholesale_invoices WHERE customer_id = ? AND is_voided = 0;",
+            &payload.customer_id,
+        );
+
         tx.commit().map_err(|e| format!("Failed to commit wholesale payment transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(true)
     }
@@ -5020,6 +5062,9 @@ impl DatabaseManager {
             ]
         ).map_err(|e| format!("Failed to create attar product: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "ATTAR_PRODUCT", &attar_id, "INSERT");
+        crate::cloud_sync::spawn_realtime_push();
+
         Ok(AttarDto {
             attar_id,
             sku: payload.sku.clone(),
@@ -5095,6 +5140,9 @@ impl DatabaseManager {
             ]
         ).map_err(|e| format!("Failed to update attar product: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "ATTAR_PRODUCT", &payload.attar_id, "UPDATE");
+        crate::cloud_sync::spawn_realtime_push();
+
         Ok(AttarDto {
             attar_id: payload.attar_id.clone(),
             sku: payload.sku.clone(),
@@ -5134,30 +5182,6 @@ impl DatabaseManager {
         } else {
             conn.execute("DELETE FROM attar_products WHERE attar_id = ?;", [attar_id])
                 .map_err(|e| format!("Failed to delete attar: {}", e))?;
-        }
-        Ok(true)
-    }
-
-    pub fn clear_all_attars(&self) -> Result<bool, String> {
-        let conn = self.get_connection().map_err(|e| e.to_string())?;
-        let attars: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT attar_id FROM attar_products;").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
-
-        for aid in attars {
-            let sales_count: i64 = conn.query_row(
-                "SELECT count(*) FROM sales_invoice_items WHERE attar_id = ?;",
-                [&aid],
-                |r| r.get(0)
-            ).unwrap_or(0);
-
-            if sales_count > 0 {
-                conn.execute("UPDATE attar_products SET is_active = 0 WHERE attar_id = ?;", [&aid]).ok();
-            } else {
-                conn.execute("DELETE FROM attar_products WHERE attar_id = ?;", [&aid]).ok();
-            }
         }
         Ok(true)
     }
@@ -6027,7 +6051,10 @@ impl DatabaseManager {
             ).map_err(|e| format!("Failed to record opening denominations: {}", e))?;
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &payload.terminal_id, "CASH_SHIFT", &shift_id, "INSERT");
+
         tx.commit().map_err(|e| format!("Failed to commit open shift transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(shift_id)
     }
@@ -6127,7 +6154,10 @@ impl DatabaseManager {
             rusqlite::params![now, system_expected_cash, physical_counted_cash, payload.shift_id]
         ).map_err(|e| format!("Failed to close shift: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "CASH_SHIFT", &payload.shift_id, "UPDATE");
+
         tx.commit().map_err(|e| format!("Failed to commit close shift transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(CloseShiftResultDto {
             success: true,
@@ -6239,7 +6269,10 @@ impl DatabaseManager {
             ).map_err(|e| format!("Failed to record cash movement: {}", e))?;
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "PETTY_EXPENSE", &exp_id, "INSERT");
+
         tx.commit().map_err(|e| format!("Failed to commit petty expense transaction: {}", e))?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(exp_id)
     }
@@ -8425,6 +8458,9 @@ impl DatabaseManager {
             &now,
         ]).map_err(|e| format!("Failed to record salary payout: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "EMPLOYEE_SALARY", &payout_id, "INSERT");
+        crate::cloud_sync::spawn_realtime_push();
+
         Ok(EmployeeSalaryPayoutDto {
             payout_id,
             employee_id: payload.employee_id.clone(),
@@ -8717,6 +8753,461 @@ impl DatabaseManager {
         Ok(event_id)
     }
 
+    fn active_station_id() -> String {
+        crate::config::ConfigManager::new().load_or_create().station_id
+    }
+
+    pub fn get_outbox_counts(&self) -> (i64, i64, i64) {
+        let Ok(conn) = self.get_connection() else {
+            return (0, 0, 0);
+        };
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_outbox WHERE is_synced = 0;", [], |r| r.get(0))
+            .unwrap_or(0);
+        let quarantined: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sync_conflict_quarantine WHERE resolution_status = 'PENDING';", [], |r| r.get(0))
+            .unwrap_or(0);
+        let wal_path = self.db_path.with_extension("db-wal");
+        let wal_kb = std::fs::metadata(wal_path).map(|m| (m.len() / 1024) as i64).unwrap_or(0);
+        (pending, quarantined, wal_kb)
+    }
+
+    fn enqueue_outbox_with_conn(
+        conn: &rusqlite::Connection,
+        device_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        operation_type: &str,
+        payload_json: &str,
+    ) -> Result<(), String> {
+        let safe_op = match operation_type {
+            "INSERT" | "UPDATE" | "DELETE" => operation_type,
+            _ => "UPDATE",
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // Coalesce if an unsynced UPDATE event for the exact same entity is already waiting
+        if safe_op != "DELETE" {
+            let existing_pending_id: Option<String> = conn
+                .query_row(
+                    "SELECT event_id FROM sync_outbox WHERE is_synced = 0 AND entity_type = ? AND entity_id = ? ORDER BY local_sequence_number DESC LIMIT 1;",
+                    rusqlite::params![entity_type, entity_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(ev_id) = existing_pending_id {
+                let _ = conn.execute(
+                    "UPDATE sync_outbox SET payload_json = ?, created_at = ? WHERE event_id = ?;",
+                    rusqlite::params![payload_json, now, ev_id],
+                );
+                return Ok(());
+            }
+        }
+
+        let next_seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(local_sequence_number), 0) + 1 FROM sync_outbox WHERE device_id = ?;",
+                [device_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+
+        let event_id = format!("sync_{}_{}_{}", device_id, next_seq, uuid::Uuid::new_v4().simple());
+        conn.execute(
+            "INSERT INTO sync_outbox
+            (event_id, device_id, local_sequence_number, entity_type, entity_id, operation_type, payload_json, is_synced, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?);",
+            rusqlite::params![
+                event_id,
+                device_id,
+                next_seq,
+                entity_type,
+                entity_id,
+                safe_op,
+                payload_json,
+                now
+            ],
+        )
+        .map_err(|e| format!("Failed to enqueue outbox row: {}", e))?;
+        Ok(())
+    }
+
+    fn build_entity_snapshot_json(
+        conn: &rusqlite::Connection,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Option<serde_json::Value> {
+        match entity_type {
+            "FINISHED_PRODUCT" => conn
+                .query_row(
+                    "SELECT product_id, sku, barcode, name, brand, size_ml, category,
+                            current_stock_units, retail_price_paisa, wholesale_price_paisa,
+                            latest_batch_cost_paisa, reorder_threshold_units, is_active, updated_at
+                     FROM finished_products WHERE product_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "product_id": r.get::<_, String>(0)?,
+                            "sku": r.get::<_, String>(1)?,
+                            "barcode": r.get::<_, Option<String>>(2)?,
+                            "name": r.get::<_, String>(3)?,
+                            "brand": r.get::<_, String>(4)?,
+                            "size_ml": r.get::<_, i64>(5)?,
+                            "category": r.get::<_, String>(6)?,
+                            "current_stock_units": r.get::<_, i64>(7)?,
+                            "retail_price_paisa": r.get::<_, i64>(8)?,
+                            "wholesale_price_paisa": r.get::<_, i64>(9)?,
+                            "latest_batch_cost_paisa": r.get::<_, i64>(10)?,
+                            "reorder_threshold_units": r.get::<_, i64>(11)?,
+                            "is_active": r.get::<_, i32>(12)?,
+                            "updated_at": r.get::<_, String>(13)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "ATTAR_PRODUCT" => conn
+                .query_row(
+                    "SELECT attar_id, sku, name, origin_country, cost_per_tola_paisa,
+                            selling_price_per_tola_paisa,
+                            COALESCE(wholesale_price_per_tola_paisa, selling_price_per_tola_paisa),
+                            is_active, updated_at
+                     FROM attar_products WHERE attar_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "attar_id": r.get::<_, String>(0)?,
+                            "sku": r.get::<_, String>(1)?,
+                            "name": r.get::<_, String>(2)?,
+                            "origin_country": r.get::<_, String>(3)?,
+                            "cost_per_tola_paisa": r.get::<_, i64>(4)?,
+                            "selling_price_per_tola_paisa": r.get::<_, i64>(5)?,
+                            "wholesale_price_per_tola_paisa": r.get::<_, i64>(6)?,
+                            "is_active": r.get::<_, i32>(7)?,
+                            "updated_at": r.get::<_, String>(8)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "SALES_INVOICE" => {
+                let main = conn
+                    .query_row(
+                        "SELECT invoice_id, invoice_number, terminal_id, order_source, customer_phone,
+                                gross_total_paisa, item_discount_paisa, special_discount_paisa,
+                                net_payable_paisa, invoice_date, is_voided
+                         FROM sales_invoices WHERE invoice_id = ?;",
+                        [entity_id],
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                                r.get::<_, String>(3)?,
+                                r.get::<_, String>(4)?,
+                                r.get::<_, i64>(5)?,
+                                r.get::<_, i64>(6)?,
+                                r.get::<_, i64>(7)?,
+                                r.get::<_, i64>(8)?,
+                                r.get::<_, String>(9)?,
+                                r.get::<_, i32>(10)?,
+                            ))
+                        },
+                    )
+                    .ok()?;
+
+                let (total_cost, perfume_sales, attar_sales, tester_sales, total_units, items_summary): (i64, i64, i64, i64, i64, String) = conn
+                    .query_row(
+                        "SELECT
+                            COALESCE(SUM(sii.unit_cost_paisa * sii.quantity), 0),
+                            COALESCE(SUM(CASE WHEN sii.item_type = 'PERFUME' AND COALESCE(fp.category, '') != 'TESTER' THEN sii.line_total_paisa ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN sii.item_type = 'ATTAR' THEN sii.line_total_paisa ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN COALESCE(fp.category, '') = 'TESTER' THEN sii.line_total_paisa ELSE 0 END), 0),
+                            COALESCE(SUM(sii.quantity), 0),
+                            COALESCE(GROUP_CONCAT(sii.product_name || ' x' || sii.quantity, ', '), '')
+                         FROM sales_invoice_items sii
+                         LEFT JOIN finished_products fp ON sii.finished_product_id = fp.product_id
+                         WHERE sii.invoice_id = ?;",
+                        [entity_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                    )
+                    .unwrap_or((0, 0, 0, 0, 0, String::new()));
+
+                let payment_method: String = conn
+                    .query_row(
+                        "SELECT COALESCE(GROUP_CONCAT(payment_method, '+'), 'CASH')
+                         FROM sales_invoice_payments WHERE invoice_id = ?;",
+                        [entity_id],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or_else(|_| "CASH".to_string());
+
+                Some(serde_json::json!({
+                    "invoice_id": main.0,
+                    "invoice_number": main.1,
+                    "terminal_id": main.2,
+                    "order_source": main.3,
+                    "customer_phone": main.4,
+                    "gross_total_paisa": main.5,
+                    "item_discount_paisa": main.6,
+                    "special_discount_paisa": main.7,
+                    "net_payable_paisa": main.8,
+                    "total_cost_paisa": total_cost,
+                    "perfume_sales_paisa": perfume_sales,
+                    "attar_sales_paisa": attar_sales,
+                    "tester_sales_paisa": tester_sales,
+                    "payment_method": payment_method,
+                    "items_summary": items_summary,
+                    "total_units": total_units,
+                    "invoice_date": main.9,
+                    "is_voided": main.10,
+                }))
+            }
+            "RETURN_VOUCHER" => conn
+                .query_row(
+                    "SELECT return_id, return_voucher_number, original_sales_invoice_id, invoice_type,
+                            return_type, condition_status, total_refund_amount_paisa,
+                            refund_settlement_method, terminal_id, return_date
+                     FROM return_vouchers WHERE return_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "return_id": r.get::<_, String>(0)?,
+                            "return_voucher_number": r.get::<_, String>(1)?,
+                            "original_sales_invoice_id": r.get::<_, Option<String>>(2)?,
+                            "invoice_type": r.get::<_, String>(3)?,
+                            "return_type": r.get::<_, String>(4)?,
+                            "condition_status": r.get::<_, String>(5)?,
+                            "total_refund_amount_paisa": r.get::<_, i64>(6)?,
+                            "refund_settlement_method": r.get::<_, String>(7)?,
+                            "terminal_id": r.get::<_, String>(8)?,
+                            "return_date": r.get::<_, String>(9)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "ONLINE_ORDER" => conn
+                .query_row(
+                    "SELECT order_id, order_number, channel, customer_name, customer_phone, city,
+                            items_json, subtotal_paisa, delivery_charges_paisa, discount_paisa,
+                            total_amount_paisa, advance_paid_paisa, cod_balance_paisa, payment_status,
+                            payment_custodian, courier_partner, tracking_number, delivery_status,
+                            COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0), created_at
+                     FROM online_orders WHERE order_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "order_id": r.get::<_, String>(0)?,
+                            "order_number": r.get::<_, String>(1)?,
+                            "channel": r.get::<_, String>(2)?,
+                            "customer_name": r.get::<_, String>(3)?,
+                            "customer_phone": r.get::<_, String>(4)?,
+                            "city": r.get::<_, String>(5)?,
+                            "items_json": r.get::<_, String>(6)?,
+                            "subtotal_paisa": r.get::<_, i64>(7)?,
+                            "delivery_charges_paisa": r.get::<_, i64>(8)?,
+                            "discount_paisa": r.get::<_, i64>(9)?,
+                            "total_amount_paisa": r.get::<_, i64>(10)?,
+                            "advance_paid_paisa": r.get::<_, i64>(11)?,
+                            "cod_balance_paisa": r.get::<_, i64>(12)?,
+                            "payment_status": r.get::<_, String>(13)?,
+                            "payment_custodian": r.get::<_, String>(14)?,
+                            "courier_partner": r.get::<_, String>(15)?,
+                            "tracking_number": r.get::<_, String>(16)?,
+                            "delivery_status": r.get::<_, String>(17)?,
+                            "refund_amount_paisa": r.get::<_, i64>(18)?,
+                            "deduction_amount_paisa": r.get::<_, i64>(19)?,
+                            "created_at": r.get::<_, String>(20)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "WHOLESALE_CUSTOMER" => conn
+                .query_row(
+                    "SELECT customer_id, business_name, contact_person, phone, city,
+                            current_balance_paisa, credit_limit_paisa, is_active, updated_at
+                     FROM wholesale_customers WHERE customer_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "customer_id": r.get::<_, String>(0)?,
+                            "business_name": r.get::<_, String>(1)?,
+                            "contact_person": r.get::<_, String>(2)?,
+                            "phone": r.get::<_, String>(3)?,
+                            "city": r.get::<_, String>(4)?,
+                            "current_balance_paisa": r.get::<_, i64>(5)?,
+                            "credit_limit_paisa": r.get::<_, i64>(6)?,
+                            "is_active": r.get::<_, i32>(7)?,
+                            "updated_at": r.get::<_, String>(8)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "WHOLESALE_INVOICE" => conn
+                .query_row(
+                    "SELECT wi.wholesale_invoice_id, wi.invoice_number, wi.customer_id,
+                            COALESCE(wc.business_name, ''), wi.subtotal_paisa, wi.discount_paisa,
+                            wi.net_total_paisa, wi.paid_amount_paisa, wi.balance_due_paisa,
+                            wi.payment_status, wi.invoice_date, wi.is_voided
+                     FROM wholesale_invoices wi
+                     LEFT JOIN wholesale_customers wc ON wi.customer_id = wc.customer_id
+                     WHERE wi.wholesale_invoice_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "wholesale_invoice_id": r.get::<_, String>(0)?,
+                            "invoice_number": r.get::<_, String>(1)?,
+                            "customer_id": r.get::<_, String>(2)?,
+                            "customer_name": r.get::<_, String>(3)?,
+                            "subtotal_paisa": r.get::<_, i64>(4)?,
+                            "discount_paisa": r.get::<_, i64>(5)?,
+                            "net_total_paisa": r.get::<_, i64>(6)?,
+                            "amount_paid_paisa": r.get::<_, i64>(7)?,
+                            "balance_due_paisa": r.get::<_, i64>(8)?,
+                            "payment_status": r.get::<_, String>(9)?,
+                            "invoice_date": r.get::<_, String>(10)?,
+                            "is_voided": r.get::<_, i32>(11)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "PETTY_EXPENSE" => conn
+                .query_row(
+                    "SELECT expense_id, category, expense_date, amount_paisa, description,
+                            recipient_payee, authorized_by_name
+                     FROM petty_expenses WHERE expense_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "expense_id": r.get::<_, String>(0)?,
+                            "category": r.get::<_, String>(1)?,
+                            "expense_date": r.get::<_, String>(2)?,
+                            "amount_paisa": r.get::<_, i64>(3)?,
+                            "description": r.get::<_, String>(4)?,
+                            "recipient_payee": r.get::<_, String>(5)?,
+                            "authorized_by_name": r.get::<_, Option<String>>(6)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "EMPLOYEE_SALARY" => conn
+                .query_row(
+                    "SELECT payout_id, employee_name, employee_role, payout_type, amount_paisa,
+                            payment_method, payout_date, notes
+                     FROM employee_salary_payouts WHERE payout_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "payout_id": r.get::<_, String>(0)?,
+                            "employee_name": r.get::<_, String>(1)?,
+                            "employee_role": r.get::<_, String>(2)?,
+                            "payout_type": r.get::<_, String>(3)?,
+                            "amount_paisa": r.get::<_, i64>(4)?,
+                            "payment_method": r.get::<_, String>(5)?,
+                            "payout_date": r.get::<_, String>(6)?,
+                            "notes": r.get::<_, Option<String>>(7)?,
+                        }))
+                    },
+                )
+                .ok(),
+            "CASH_SHIFT" => conn
+                .query_row(
+                    "SELECT shift_id, terminal_id, opened_at, closed_at, opening_cash_float_paisa,
+                            COALESCE(system_expected_cash_paisa, 0), actual_counted_cash_paisa, shift_status
+                     FROM cash_register_shifts WHERE shift_id = ?;",
+                    [entity_id],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "shift_id": r.get::<_, String>(0)?,
+                            "terminal_id": r.get::<_, String>(1)?,
+                            "opened_at": r.get::<_, String>(2)?,
+                            "closed_at": r.get::<_, Option<String>>(3)?,
+                            "opening_cash_float_paisa": r.get::<_, i64>(4)?,
+                            "system_expected_cash_paisa": r.get::<_, i64>(5)?,
+                            "actual_counted_cash_paisa": r.get::<_, Option<i64>>(6)?,
+                            "shift_status": r.get::<_, String>(7)?,
+                        }))
+                    },
+                )
+                .ok(),
+            _ => None,
+        }
+    }
+
+    fn enqueue_entity_snapshot(
+        conn: &rusqlite::Connection,
+        device_id: &str,
+        entity_type: &str,
+        entity_id: &str,
+        operation_type: &str,
+    ) {
+        let payload = if operation_type == "DELETE" {
+            Some(serde_json::json!({ "id": entity_id, "deleted": true }))
+        } else {
+            Self::build_entity_snapshot_json(conn, entity_type, entity_id)
+        };
+        if let Some(val) = payload {
+            if let Ok(json_str) = serde_json::to_string(&val) {
+                let _ = Self::enqueue_outbox_with_conn(conn, device_id, entity_type, entity_id, operation_type, &json_str);
+            }
+        }
+    }
+
+    fn enqueue_related_snapshots(
+        conn: &rusqlite::Connection,
+        device_id: &str,
+        entity_type: &str,
+        op_type: &str,
+        sql: &str,
+        doc_id: &str,
+    ) {
+        if let Ok(mut stmt) = conn.prepare(sql) {
+            if let Ok(rows) = stmt.query_map([doc_id], |r| r.get::<_, String>(0)) {
+                let ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+                for id in ids {
+                    Self::enqueue_entity_snapshot(conn, device_id, entity_type, &id, op_type);
+                }
+            }
+        }
+    }
+
+    pub fn queue_full_cloud_sync_snapshot(&self, device_id: &str) -> Result<usize, String> {
+        let mut conn = self.get_connection().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let mut queued = 0usize;
+
+        let specs: [(&str, &str); 10] = [
+            ("FINISHED_PRODUCT", "SELECT product_id FROM finished_products;"),
+            ("ATTAR_PRODUCT", "SELECT attar_id FROM attar_products;"),
+            ("SALES_INVOICE", "SELECT invoice_id FROM sales_invoices ORDER BY invoice_date ASC;"),
+            ("RETURN_VOUCHER", "SELECT return_id FROM return_vouchers ORDER BY return_date ASC;"),
+            ("ONLINE_ORDER", "SELECT order_id FROM online_orders ORDER BY created_at ASC;"),
+            ("WHOLESALE_CUSTOMER", "SELECT customer_id FROM wholesale_customers;"),
+            ("WHOLESALE_INVOICE", "SELECT wholesale_invoice_id FROM wholesale_invoices ORDER BY invoice_date ASC;"),
+            ("PETTY_EXPENSE", "SELECT expense_id FROM petty_expenses ORDER BY expense_date ASC;"),
+            ("EMPLOYEE_SALARY", "SELECT payout_id FROM employee_salary_payouts ORDER BY payout_date ASC;"),
+            ("CASH_SHIFT", "SELECT shift_id FROM cash_register_shifts ORDER BY opened_at ASC;"),
+        ];
+
+        for (entity_type, query) in specs {
+            let ids: Vec<String> = {
+                let Ok(mut stmt) = tx.prepare(query) else { continue; };
+                let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else { continue; };
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            for id in ids {
+                if let Some(val) = Self::build_entity_snapshot_json(&tx, entity_type, &id) {
+                    if let Ok(json_str) = serde_json::to_string(&val) {
+                        if Self::enqueue_outbox_with_conn(&tx, device_id, entity_type, &id, "UPDATE", &json_str).is_ok() {
+                            queued += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        tx.commit().map_err(|e| format!("Failed to commit full cloud snapshot: {}", e))?;
+        Ok(queued)
+    }
+
     pub fn trigger_lan_replication(&self, current_node: &str, peer_node: &str) -> Result<TriggerLanSyncResultDto, String> {
         let mut conn = self.get_connection().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -8819,11 +9310,9 @@ impl DatabaseManager {
             .map_err(|e| format!("Failed to read backup metadata: {}", e))?;
         let size_bytes = metadata.len();
 
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        backup_path_str.hash(&mut hasher);
-        size_bytes.hash(&mut hasher);
-        let hash = format!("SHA256-{:016x}", hasher.finish());
+        let file_bytes = std::fs::read(&backup_file_path)
+            .map_err(|e| format!("Failed to read backup file for SHA-256 checksum: {}", e))?;
+        let hash = crate::crypto::sha256_hex(&file_bytes);
 
         // 3. Verify backup archive integrity
         let ver = self.verify_backup_archive(&backup_path_str)?;
@@ -8845,7 +9334,13 @@ impl DatabaseManager {
         Ok(BackupResultDto {
             success: true,
             record,
-            message: format!("Hot atomic backup created and verified: 46 tables, 105 indexes, 16 triggers integrity PASSED."),
+            message: format!(
+                "Hot atomic backup created and verified: {} tables, {} indexes, {} triggers integrity {}.",
+                ver.tables_count,
+                ver.indexes_count,
+                ver.triggers_count,
+                if ver.is_valid { "PASSED" } else { "WARNING" }
+            ),
         })
     }
 
@@ -8873,11 +9368,11 @@ impl DatabaseManager {
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let is_valid = integrity == "ok" && tables == 46 && indexes == 105 && triggers == 16;
+        let is_valid = integrity == "ok" && tables >= 46 && indexes >= 105 && triggers >= 16;
         let message = if is_valid {
             format!("Backup archive verified: Integrity OK, {} tables, {} indexes, {} triggers.", tables, indexes, triggers)
         } else {
-            format!("Warning: Archive mismatch. Integrity: {}, Tables: {}/46, Indexes: {}/105, Triggers: {}/16", integrity, tables, indexes, triggers)
+            format!("Warning: Archive mismatch. Integrity: {}, Tables: {} (min 46), Indexes: {} (min 105), Triggers: {} (min 16)", integrity, tables, indexes, triggers)
         };
 
         Ok(BackupVerificationResultDto {
@@ -9062,208 +9557,6 @@ impl DatabaseManager {
             line2_rendered: l2_formatted,
             message: "2x20 VFD Customer pole display command spooled successfully.".to_string(),
         })
-    }
-
-    pub fn reset_database_for_testing(&self) -> Result<String, String> {
-        let conn = self.get_connection().map_err(|e| e.to_string())?;
-
-        // Temporarily disable audit triggers
-        let _ = conn.execute_batch("
-            DROP TRIGGER IF EXISTS trg_prevent_voucher_delete;
-            DROP TRIGGER IF EXISTS trg_prevent_ledger_entry_deletion;
-            DROP TRIGGER IF EXISTS trg_prevent_stock_movement_deletion;
-            PRAGMA foreign_keys = OFF;
-        ");
-
-        // Clear all operational and demo tables cleanly (100% full database wipe)
-        let tables_to_clear = [
-            "online_order_payments",
-            "online_orders",
-            "wholesale_payments_upgraded",
-            "return_vouchers_upgraded",
-            "return_voucher_items",
-            "return_vouchers",
-            "wholesale_customer_ledger",
-            "wholesale_payments",
-            "wholesale_invoice_items",
-            "wholesale_invoices",
-            "wholesale_customers",
-            "supplier_ledger",
-            "supplier_payments",
-            "supplier_purchase_lines",
-            "supplier_purchase_invoices",
-            "suppliers",
-            "manufacturing_batch_consumptions",
-            "manufacturing_batches",
-            "perfume_recipe_items",
-            "perfume_recipes",
-            "finished_products",
-            "raw_materials",
-            "attar_products",
-            "damaged_inventory_quarantine",
-            "stock_reconciliation_queue",
-            "stock_movements",
-            "cash_shift_audit",
-            "cash_shift_denominations",
-            "cash_movements",
-            "cash_register_shifts",
-            "petty_expenses",
-            "employee_salary_payouts",
-            "customer_store_credit_movements",
-            "customer_store_credits",
-            "sales_invoice_payments",
-            "sales_invoice_items",
-            "sales_invoices",
-            "daily_financial_summaries",
-            "financial_ledger_entries",
-            "journal_vouchers",
-            "sync_inbox_journal",
-            "sync_outbox",
-            "sync_conflict_quarantine",
-            "cashier_assignments",
-            "audit_logs",
-            "backup_archive_manifest",
-            "backup_restore_audit",
-            "sync_watermarks",
-            "promotional_offers",
-            "sqlite_sequence",
-        ];
-
-        for table in &tables_to_clear {
-            let sql = format!("DELETE FROM {};", table);
-            let _ = conn.execute(&sql, []);
-        }
-
-        // Dynamically wipe ALL user tables from sqlite_master (preserving 'users' and system tables)
-        if let Ok(mut stmt) = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'users' AND name != '_schema_migrations';") {
-            if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
-                for t in rows.flatten() {
-                    let sql = format!("DELETE FROM {};", t);
-                    let _ = conn.execute(&sql, []);
-                }
-            }
-        }
-        let _ = conn.execute("DELETE FROM sqlite_sequence;", []);
-
-        // Guarantee online_orders table exists
-        let _ = conn.execute("
-            CREATE TABLE IF NOT EXISTS online_orders (
-                order_id TEXT PRIMARY KEY NOT NULL,
-                order_number TEXT NOT NULL UNIQUE,
-                channel TEXT NOT NULL CHECK(channel IN ('WHATSAPP', 'WEBSITE')),
-                customer_name TEXT NOT NULL,
-                customer_phone TEXT NOT NULL,
-                shipping_address TEXT NOT NULL,
-                city TEXT NOT NULL,
-                items_json TEXT NOT NULL,
-                subtotal_paisa INTEGER NOT NULL DEFAULT 0,
-                delivery_charges_paisa INTEGER NOT NULL DEFAULT 0,
-                discount_paisa INTEGER NOT NULL DEFAULT 0,
-                total_amount_paisa INTEGER NOT NULL DEFAULT 0,
-                advance_paid_paisa INTEGER NOT NULL DEFAULT 0,
-                cod_balance_paisa INTEGER NOT NULL DEFAULT 0,
-                payment_status TEXT NOT NULL DEFAULT 'PENDING' CHECK(payment_status IN ('PENDING', 'PARTIAL', 'PAID', 'RETURNED')),
-                payment_custodian TEXT NOT NULL DEFAULT 'COURIER_COD' CHECK(payment_custodian IN ('COURIER_COD', 'STAFF_HANDLER', 'SETTLED', 'WA_STAFF_HANDLER', 'WEB_STAFF_HANDLER')),
-                courier_partner TEXT NOT NULL DEFAULT 'TCS Express',
-                tracking_number TEXT,
-                delivery_status TEXT NOT NULL DEFAULT 'BOOKED' CHECK(delivery_status IN ('BOOKED', 'DISPATCHED', 'IN_TRANSIT', 'DELIVERED', 'RETURNED', 'CANCELLED')),
-                collected_by TEXT,
-                collected_at TEXT,
-                collection_method TEXT,
-                collection_reference TEXT,
-                return_reason TEXT,
-                notes TEXT,
-                created_at TEXT NOT NULL,
-                created_by_user_id TEXT NOT NULL,
-                refund_amount_paisa INTEGER NOT NULL DEFAULT 0,
-                deduction_amount_paisa INTEGER NOT NULL DEFAULT 0,
-                refund_settlement_method TEXT
-            );
-        ", []);
-
-        // Guarantee online_order_payments table exists
-        let _ = conn.execute("
-            CREATE TABLE IF NOT EXISTS online_order_payments (
-                payment_id TEXT PRIMARY KEY NOT NULL,
-                order_id TEXT NOT NULL REFERENCES online_orders(order_id) ON DELETE CASCADE,
-                amount_paid_paisa INTEGER NOT NULL,
-                payment_method TEXT NOT NULL,
-                reference_number TEXT,
-                collected_by TEXT NOT NULL,
-                notes TEXT,
-                created_at TEXT NOT NULL
-            );
-        ", []);
-
-        // Guarantee employee_salary_payouts exists for subsequent operations
-        let _ = conn.execute("
-            CREATE TABLE IF NOT EXISTS employee_salary_payouts (
-                payout_id TEXT PRIMARY KEY NOT NULL,
-                employee_id TEXT NOT NULL,
-                employee_name TEXT NOT NULL,
-                employee_role TEXT NOT NULL DEFAULT 'SALES_STAFF',
-                payout_type TEXT NOT NULL CHECK(payout_type IN ('DAILY_WAGE', 'WEEKLY_PAYOUT', 'MONTHLY_SALARY', 'ADVANCE_PAYMENT', 'COMMISSION')),
-                amount_paisa INTEGER NOT NULL CHECK(amount_paisa > 0),
-                payment_method TEXT NOT NULL CHECK(payment_method IN ('CASH', 'EASYPAISA', 'JAZZCASH')),
-                disbursed_by_user_id TEXT NOT NULL,
-                disbursed_by_name TEXT NOT NULL,
-                notes TEXT,
-                payout_date TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-        ", []);
-
-        // Guarantee promotional_offers exists after wipe
-        let _ = conn.execute("
-            CREATE TABLE IF NOT EXISTS promotional_offers (
-                offer_id TEXT PRIMARY KEY NOT NULL,
-                title TEXT NOT NULL,
-                tag TEXT NOT NULL,
-                description TEXT,
-                items_json TEXT NOT NULL,
-                regular_total_paisa INTEGER NOT NULL,
-                bundle_price_paisa INTEGER NOT NULL,
-                savings_paisa INTEGER NOT NULL,
-                discount_percent INTEGER NOT NULL,
-                total_cost_paisa INTEGER NOT NULL,
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-        ", []);
-
-        let _ = conn.execute("PRAGMA foreign_keys = ON;", []);
-
-        // Recreate the 3 audit triggers
-        let triggers_script = "
-            CREATE TRIGGER IF NOT EXISTS trg_prevent_voucher_delete
-            BEFORE DELETE ON journal_vouchers
-            BEGIN
-                SELECT RAISE(ABORT, 'CRITICAL ERROR: Deleting accounting vouchers is strictly prohibited.');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_prevent_ledger_entry_deletion
-            BEFORE DELETE ON financial_ledger_entries
-            WHEN (SELECT is_immutable FROM journal_vouchers WHERE voucher_id = OLD.voucher_id) = 1
-            BEGIN
-                SELECT RAISE(ABORT, 'FINANCIAL VIOLATION: Ledger entries of posted vouchers cannot be deleted.');
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS trg_prevent_stock_movement_deletion
-            BEFORE DELETE ON stock_movements
-            BEGIN
-                SELECT RAISE(ABORT, 'CRITICAL ERROR: Deleting stock movements is strictly prohibited.');
-            END;
-        ";
-
-        let _ = conn.execute_batch(triggers_script);
-
-        // Re-seed all essential standard users and salesperson so POS & Auth always function seamlessly
-        let _ = Self::ensure_default_users(&conn);
-
-        Ok("Database wiped successfully. All test records, shifts, products, wholesale accounts, and movements have been completely cleared. Ready for fresh test entries.".to_string())
     }
 
     pub fn get_promotional_offers(&self) -> Result<Vec<PromotionalOfferDto>, String> {
@@ -9533,7 +9826,10 @@ impl DatabaseManager {
             }
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "ONLINE_ORDER", &order_id, "INSERT");
+
         tx.commit().map_err(|e| e.to_string())?;
+        crate::cloud_sync::spawn_realtime_push();
 
         Ok(OnlineOrderDto {
             order_id,
@@ -9638,7 +9934,10 @@ impl DatabaseManager {
             payload.order_id,
         ]).map_err(|e| format!("Failed to update order settlement: {}", e))?;
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "ONLINE_ORDER", &payload.order_id, "UPDATE");
+
         tx.commit().map_err(|e| e.to_string())?;
+        crate::cloud_sync::spawn_realtime_push();
         Ok(true)
     }
 
@@ -9775,7 +10074,10 @@ impl DatabaseManager {
             ]).map_err(|e| format!("Failed to mark return: {}", e))?;
         }
 
+        Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "ONLINE_ORDER", &payload.order_id, "UPDATE");
+
         tx.commit().map_err(|e| e.to_string())?;
+        crate::cloud_sync::spawn_realtime_push();
         Ok(true)
     }
 
@@ -9803,6 +10105,8 @@ impl DatabaseManager {
             ", rusqlite::params![delivery_status, order_id])
                 .map_err(|e| e.to_string())?;
         }
+        Self::enqueue_entity_snapshot(&conn, &Self::active_station_id(), "ONLINE_ORDER", order_id, "UPDATE");
+        crate::cloud_sync::spawn_realtime_push();
         Ok(true)
     }
 }

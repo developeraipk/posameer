@@ -231,7 +231,7 @@ export const UserSecurityManagement: React.FC<UserSecurityManagementProps> = ({ 
     setIsSaving(true);
     try {
       await updateUserSecurity({
-        caller_user_id: currentUser?.user_id || "usr_ibrar",
+        caller_user_id: currentUser?.user_id || "",
         target_user_id: editingUser.user_id,
         new_full_name: editFullName.trim(),
         new_username: editUsername.trim().toLowerCase(),
@@ -291,7 +291,7 @@ export const UserSecurityManagement: React.FC<UserSecurityManagementProps> = ({ 
     setIsSaving(true);
     try {
       await updateUserSecurity({
-        caller_user_id: currentUser?.user_id || "usr_ibrar",
+        caller_user_id: currentUser?.user_id || "",
         target_user_id: pinPasswordUser.user_id,
         new_pin: pinPasswordPin.trim() ? pinPasswordPin.trim() : undefined,
         new_password: pinPasswordPwd.trim() ? pinPasswordPwd.trim() : undefined,
@@ -1133,7 +1133,7 @@ export const UserSecurityManagement: React.FC<UserSecurityManagementProps> = ({ 
               </label>
               <input
                 type="text"
-                placeholder="e.g. M Ibrar Khan"
+                placeholder="e.g. Ali Raza"
                 value={newFullName}
                 onChange={(e) => setNewFullName(e.target.value)}
                 className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
@@ -1248,7 +1248,7 @@ export const UserSecurityManagement: React.FC<UserSecurityManagementProps> = ({ 
             <input
               type="text"
               required
-              placeholder="e.g. M Ibrar Khan"
+              placeholder="e.g. Ali Raza"
               value={newEmpName}
               onChange={(e) => setNewEmpName(e.target.value)}
               className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
@@ -1274,7 +1274,7 @@ export const UserSecurityManagement: React.FC<UserSecurityManagementProps> = ({ 
               </label>
               <input
                 type="text"
-                placeholder="0332-6485172"
+                placeholder="0300-0000000"
                 value={newEmpPhone}
                 onChange={(e) => setNewEmpPhone(e.target.value)}
                 className="w-full px-3 py-2 bg-slate-100 dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg text-xs text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-amber-500"
