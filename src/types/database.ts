@@ -830,6 +830,7 @@ export interface PettyExpense {
 
 export interface RecordPettyExpensePayload {
   shift_id?: string;
+  deduct_from_drawer?: boolean;
   category: string;
   amount_paisa: number;
   description: string;

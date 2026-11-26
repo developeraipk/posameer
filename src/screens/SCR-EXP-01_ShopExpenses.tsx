@@ -86,8 +86,11 @@ export const ShopExpenses: React.FC<ShopExpensesProps> = ({ currentUser, status 
 
     setIsSubmitting(true);
     try {
+      const latestShift = deductFromDrawer ? await getActiveShift(status.stationId, currentUser?.role).catch(() => activeShift) : null;
+      const effectiveShift = latestShift || activeShift;
       const payload: RecordPettyExpensePayload = {
-        shift_id: deductFromDrawer && activeShift ? activeShift.shift_id : undefined,
+        shift_id: deductFromDrawer && effectiveShift ? effectiveShift.shift_id : undefined,
+        deduct_from_drawer: deductFromDrawer,
         category,
         amount_paisa: amountPaisa,
         description: description.trim(),

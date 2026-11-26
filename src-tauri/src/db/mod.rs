@@ -5307,6 +5307,8 @@ pub struct PettyExpenseDto {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RecordPettyExpensePayload {
     pub shift_id: Option<String>,
+    #[serde(default)]
+    pub deduct_from_drawer: Option<bool>,
     pub category: String,
     pub amount_paisa: i64,
     pub description: String,
@@ -6220,6 +6222,10 @@ impl DatabaseManager {
     }
 
     pub fn record_petty_expense(&self, payload: &RecordPettyExpensePayload) -> Result<String, String> {
+        if payload.amount_paisa <= 0 {
+            return Err("Expense amount must be greater than Rs. 0.".to_string());
+        }
+
         let mut conn = self.get_connection().map_err(|e| e.to_string())?;
         let _ = conn.execute("ALTER TABLE petty_expenses ADD COLUMN authorized_by_name TEXT;", []);
         let _ = conn.execute("ALTER TABLE petty_expenses ADD COLUMN brought_by_name TEXT;", []);
@@ -6231,27 +6237,94 @@ impl DatabaseManager {
         let auth_clean = payload.authorized_by_name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
         let brought_clean = payload.brought_by_name.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
 
+        let normalized_category = match payload.category.trim().to_uppercase().as_str() {
+            "CHAI_REFRESHMENTS" => "CHAI_REFRESHMENTS",
+            "CLEANING_SUPPLIES" => "CLEANING_SUPPLIES",
+            "UTILITIES_MISC" => "UTILITIES_MISC",
+            "OFFICE_STATIONERY" => "OFFICE_STATIONERY",
+            "REPAIR_MAINTENANCE" => "REPAIR_MAINTENANCE",
+            "TRAVEL_CONVEYANCE" => "TRAVEL_CONVEYANCE",
+            _ => "OTHER",
+        };
+
+        // Ensure valid user foreign keys so expense recording never fails after admin resets
+        let verified_manager_id: String = if tx.query_row(
+            "SELECT count(*) FROM users WHERE user_id = ?;",
+            [&payload.authorized_by_manager_id],
+            |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0 {
+            payload.authorized_by_manager_id.clone()
+        } else {
+            tx.query_row(
+                "SELECT user_id FROM users WHERE is_active = 1 ORDER BY CASE WHEN role IN ('OWNER', 'ADMIN', 'SHOP_MANAGER') THEN 0 ELSE 1 END, created_at ASC LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap_or_else(|_| payload.authorized_by_manager_id.clone())
+        };
+
+        let verified_creator_id: String = if tx.query_row(
+            "SELECT count(*) FROM users WHERE user_id = ?;",
+            [&payload.created_by_user_id],
+            |r| r.get::<_, i64>(0)
+        ).unwrap_or(0) > 0 {
+            payload.created_by_user_id.clone()
+        } else {
+            tx.query_row(
+                "SELECT user_id FROM users WHERE is_active = 1 ORDER BY created_at ASC LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap_or_else(|_| verified_manager_id.clone())
+        };
+
+        // Link active open shift when deducting from physical cash drawer
+        let effective_shift_id: Option<String> = if payload.deduct_from_drawer == Some(false) {
+            None
+        } else if let Some(ref sid) = payload.shift_id {
+            let exists: i64 = tx.query_row(
+                "SELECT count(*) FROM cash_register_shifts WHERE shift_id = ?;",
+                [sid],
+                |r| r.get(0)
+            ).unwrap_or(0);
+            if exists > 0 {
+                Some(sid.clone())
+            } else {
+                tx.query_row(
+                    "SELECT shift_id FROM cash_register_shifts WHERE shift_status = 'OPEN' ORDER BY opened_at DESC LIMIT 1;",
+                    [],
+                    |r| r.get(0)
+                ).ok()
+            }
+        } else if payload.deduct_from_drawer == Some(true) {
+            tx.query_row(
+                "SELECT shift_id FROM cash_register_shifts WHERE shift_status = 'OPEN' ORDER BY opened_at DESC LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).ok()
+        } else {
+            None
+        };
+
         tx.execute(
             "INSERT INTO petty_expenses
             (expense_id, shift_id, category, expense_date, amount_paisa, description, recipient_payee, authorized_by_manager_id, created_by_user_id, authorized_by_name, brought_by_name, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             rusqlite::params![
                 exp_id,
-                payload.shift_id,
-                payload.category,
+                effective_shift_id,
+                normalized_category,
                 now,
                 payload.amount_paisa,
                 payload.description,
                 payload.recipient_payee,
-                payload.authorized_by_manager_id,
-                payload.created_by_user_id,
+                verified_manager_id,
+                verified_creator_id,
                 auth_clean,
                 brought_clean,
                 now
             ]
         ).map_err(|e| format!("Failed to insert petty expense: {}", e))?;
 
-        if let Some(ref sh_id) = payload.shift_id {
+        if let Some(ref sh_id) = effective_shift_id {
             let mov_id = format!("cmov_{}", exp_id);
             tx.execute(
                 "INSERT INTO cash_movements
@@ -6263,10 +6336,17 @@ impl DatabaseManager {
                     payload.amount_paisa,
                     exp_id,
                     payload.description,
-                    payload.created_by_user_id,
+                    verified_creator_id,
                     now
                 ]
             ).map_err(|e| format!("Failed to record cash movement: {}", e))?;
+
+            tx.execute(
+                "UPDATE cash_register_shifts
+                 SET system_expected_cash_paisa = MAX(0, COALESCE(system_expected_cash_paisa, 0) - ?)
+                 WHERE shift_id = ? AND shift_status = 'OPEN';",
+                rusqlite::params![payload.amount_paisa, sh_id]
+            ).map_err(|e| format!("Failed to update shift expected cash: {}", e))?;
         }
 
         Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "PETTY_EXPENSE", &exp_id, "INSERT");
@@ -6747,34 +6827,34 @@ impl DatabaseManager {
         let period_type = period.as_deref().unwrap_or("today").to_lowercase();
         let (inv_cond_no_alias, inv_cond_si, ret_cond_no_alias, ret_cond_rv, wi_cond_wi, sal_cond, exp_cond, wp_cond_wp) = match period_type.as_str() {
             "weekly" => (
-                "date(invoice_date) >= date('now', '-6 days')",
-                "date(si.invoice_date) >= date('now', '-6 days')",
-                "date(return_date) >= date('now', '-6 days')",
-                "date(rv.return_date) >= date('now', '-6 days')",
-                "date(wi.invoice_date) >= date('now', '-6 days')",
-                "date(COALESCE(payout_date, created_at)) >= date('now', '-6 days')",
-                "date(expense_date) >= date('now', '-6 days')",
-                "date(wp.payment_date) >= date('now', '-6 days')",
+                "date(invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(si.invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(return_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(rv.return_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(wi.invoice_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(COALESCE(payout_date, created_at), '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(expense_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
+                "date(wp.payment_date, '+5 hours') >= date('now', '+5 hours', '-6 days')",
             ),
             "monthly" => (
-                "strftime('%Y-%m', invoice_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', si.invoice_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', return_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', rv.return_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', wi.invoice_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', COALESCE(payout_date, created_at)) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', expense_date) = strftime('%Y-%m', 'now')",
-                "strftime('%Y-%m', wp.payment_date) = strftime('%Y-%m', 'now')",
+                "strftime('%Y-%m', invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', si.invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', return_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', rv.return_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', wi.invoice_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', COALESCE(payout_date, created_at), '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', expense_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
+                "strftime('%Y-%m', wp.payment_date, '+5 hours') = strftime('%Y-%m', 'now', '+5 hours')",
             ),
             "yearly" => (
-                "strftime('%Y', invoice_date) = strftime('%Y', 'now')",
-                "strftime('%Y', si.invoice_date) = strftime('%Y', 'now')",
-                "strftime('%Y', return_date) = strftime('%Y', 'now')",
-                "strftime('%Y', rv.return_date) = strftime('%Y', 'now')",
-                "strftime('%Y', wi.invoice_date) = strftime('%Y', 'now')",
-                "strftime('%Y', COALESCE(payout_date, created_at)) = strftime('%Y', 'now')",
-                "strftime('%Y', expense_date) = strftime('%Y', 'now')",
-                "strftime('%Y', wp.payment_date) = strftime('%Y', 'now')",
+                "strftime('%Y', invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', si.invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', return_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', rv.return_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', wi.invoice_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', COALESCE(payout_date, created_at), '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', expense_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
+                "strftime('%Y', wp.payment_date, '+5 hours') = strftime('%Y', 'now', '+5 hours')",
             ),
             "all" => (
                 "1=1",
@@ -7777,8 +7857,9 @@ impl DatabaseManager {
             |r| r.get(0)
         ).unwrap_or(0);
 
+        // Count all store petty operating expenses in the selected period regardless of shift status
         let total_shop_expenses_paisa: i64 = conn.query_row(
-            &format!("SELECT COALESCE(SUM(amount_paisa), 0) FROM petty_expenses WHERE shift_id IS NOT NULL AND ({});", exp_cond),
+            &format!("SELECT COALESCE(SUM(amount_paisa), 0) FROM petty_expenses WHERE {};", exp_cond),
             [],
             |r| r.get(0)
         ).unwrap_or(0);
@@ -7925,33 +8006,33 @@ impl DatabaseManager {
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let _all_time_cash_salaries: i64 = conn.query_row(
+        let all_time_cash_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE UPPER(payment_method) = 'CASH';",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let _all_time_ep_salaries: i64 = conn.query_row(
+        let all_time_ep_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE (UPPER(payment_method) LIKE '%EASYPAISA%' OR UPPER(payment_method) LIKE '%EASY_PAISA%');",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let _all_time_jc_salaries: i64 = conn.query_row(
+        let all_time_jc_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE (UPPER(payment_method) LIKE '%JAZZCASH%' OR UPPER(payment_method) LIKE '%JAZZ_CASH%');",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let _all_time_expenses: i64 = conn.query_row(
-            "SELECT COALESCE(SUM(amount_paisa), 0) FROM petty_expenses;",
+        let all_time_drawer_expenses: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(amount_paisa), 0) FROM petty_expenses WHERE shift_id IS NOT NULL;",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_cash_drawer_paisa = (all_time_gross_cash - all_time_cash_refunds).max(0);
-        let all_time_easypaisa_paisa = (all_time_gross_ep - all_time_ep_refunds).max(0);
-        let all_time_jazzcash_paisa = (all_time_gross_jc - all_time_jc_refunds).max(0);
+        let all_time_cash_drawer_paisa = (all_time_gross_cash - all_time_cash_refunds - all_time_cash_salaries - all_time_drawer_expenses).max(0);
+        let all_time_easypaisa_paisa = (all_time_gross_ep - all_time_ep_refunds - all_time_ep_salaries).max(0);
+        let all_time_jazzcash_paisa = (all_time_gross_jc - all_time_jc_refunds - all_time_jc_salaries).max(0);
 
         let (total_online_pending_paisa, online_pending_orders_count): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(cod_balance_paisa), 0), COUNT(*) FROM online_orders WHERE payment_status NOT IN ('PAID', 'RETURNED') AND cod_balance_paisa > 0;",
