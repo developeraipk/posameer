@@ -125,3 +125,53 @@ export function formatLocalTime(dateStr?: string | null): string {
     return dateStr;
   }
 }
+
+/**
+ * Returns 'HH:mm:ss' in Pakistan Local Time (Asia/Karachi, UTC+5).
+ */
+export function getPKTTime(d: Date = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Karachi",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(d);
+  } catch {
+    const utc = d.getTime() + d.getTimezoneOffset() * 60000;
+    const pkt = new Date(utc + 5 * 3600000);
+    return pkt.toISOString().slice(11, 19);
+  }
+}
+
+/**
+ * Checks whether a timestamp string falls inside the requested PKT (UTC+5) calendar period.
+ * Day boundaries strictly cut off at 12:00 AM Midnight Asia/Karachi time.
+ */
+export function isDateInPKTPeriod(
+  dateStr: string | Date | null | undefined,
+  period: "TODAY" | "WEEK" | "MONTH" | "YEAR" | "ALL"
+): boolean {
+  if (period === "ALL") return true;
+  const recordPKT = parseDateToPKT(dateStr);
+  if (!recordPKT) return false;
+
+  const todayPKT = getPKTDate(new Date());
+  if (period === "TODAY") {
+    return recordPKT === todayPKT;
+  }
+  if (period === "WEEK") {
+    const d6 = new Date();
+    d6.setDate(d6.getDate() - 6);
+    const weekAgoPKT = getPKTDate(d6);
+    return recordPKT >= weekAgoPKT && recordPKT <= todayPKT;
+  }
+  if (period === "MONTH") {
+    return recordPKT.startsWith(todayPKT.slice(0, 7));
+  }
+  if (period === "YEAR") {
+    return recordPKT.startsWith(todayPKT.slice(0, 4));
+  }
+  return true;
+}

@@ -12,7 +12,7 @@ import {
   getAllUsers,
 } from "@/lib/tauri-bridge";
 import { formatPaisaToRupees } from "@/lib/formatters";
-import { formatLocalDateTime } from "@/lib/date-utils";
+import { formatLocalDateTime, isDateInPKTPeriod } from "@/lib/date-utils";
 import { Card } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -2450,21 +2450,9 @@ export const RetailBilling: React.FC<RetailBillingProps> = ({ currentUser, statu
           </div>
 
           {(() => {
-            const now = new Date();
-            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-            const weekStart = new Date(now);
-            weekStart.setDate(now.getDate() - now.getDay());
-            weekStart.setHours(0, 0, 0, 0);
-            const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-            const yearStart = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
-
             const filteredSales = recentSales.filter((s) => {
-              if (historyPeriod !== "ALL") {
-                const d = new Date(s.invoice_date);
-                if (historyPeriod === "TODAY" && d < todayStart) return false;
-                if (historyPeriod === "WEEK" && d < weekStart) return false;
-                if (historyPeriod === "MONTH" && d < monthStart) return false;
-                if (historyPeriod === "YEAR" && d < yearStart) return false;
+              if (!isDateInPKTPeriod(s.invoice_date, historyPeriod)) {
+                return false;
               }
               if (!historySearchQuery.trim()) return true;
               const q = historySearchQuery.toLowerCase();

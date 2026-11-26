@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Dialog } from "@/components/ui/Dialog";
 import { exportSalariesToCSV } from "@/lib/export-utils";
+import { getPKTDate, getPKTTime, parseDateToPKT, isDateInPKTPeriod } from "@/lib/date-utils";
 import {
   Banknote,
   Smartphone,
@@ -45,7 +46,7 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
   const [selectedStaffId, setSelectedStaffId] = useState("");
   const [payoutType, setPayoutType] = useState<"DAILY_WAGE" | "WEEKLY_PAYOUT" | "MONTHLY_SALARY" | "ADVANCE_PAYMENT" | "COMMISSION">("DAILY_WAGE");
   const [amountRupees, setAmountRupees] = useState("");
-  const [payoutDate, setPayoutDate] = useState(new Date().toISOString().slice(0, 10));
+  const [payoutDate, setPayoutDate] = useState(() => getPKTDate());
   const [notes, setNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -193,7 +194,7 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
         disbursed_by_user_id: currentUser?.user_id || "usr_admin",
         disbursed_by_name: authorizedByName.trim() || "Owner ( Ameer )",
         notes: notes.trim() || undefined,
-        payout_date: `${payoutDate}T${new Date().toTimeString().slice(0, 8)}`,
+        payout_date: `${payoutDate}T${getPKTTime()}+05:00`,
       };
 
       const result = await recordEmployeeSalaryPayout(payload);
@@ -203,8 +204,10 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
       });
       setIsModalOpen(false);
       setAmountRupees("");
+      setPayoutDate(getPKTDate());
       setNotes("");
       loadData();
+      window.dispatchEvent(new CustomEvent("app:refresh-data"));
       setSelectedPayoutForSlip(result);
     } catch (err) {
       console.error("Failed to disburse salary:", err);
@@ -232,7 +235,7 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
           </div>
           <div style="border-top:1.5px dashed #000000; margin:5px 0;"></div>
           <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Voucher #:</span><span style="font-weight:900; font-family:monospace;">${p.payout_id}</span></div>
-          <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Date & Time:</span><span style="font-weight:700;">${new Date(p.payout_date).toLocaleString()}</span></div>
+          <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Date & Time:</span><span style="font-weight:700;">${new Date(p.payout_date).toLocaleString("en-PK", { timeZone: "Asia/Karachi" })}</span></div>
           <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Employee:</span><span style="font-weight:900;">${p.employee_name}</span></div>
           <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Designation:</span><span style="font-weight:700;">${p.employee_role}</span></div>
           <div style="display:flex; justify-content:space-between; margin:2.5px 0;"><span>Payout Type:</span><span style="font-weight:800;">${p.payout_type.replace(/_/g, ' ')}</span></div>
@@ -275,25 +278,18 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
     }
   };
 
-  // Metrics with Period Filter
-  const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const currentMonthStr = todayStr.slice(0, 7);
+  // Metrics with strict PKT (Asia/Karachi, UTC+5) Period Filter
+  const todayPKT = getPKTDate(new Date());
 
-  const periodFilteredPayouts = payouts.filter((p) => {
-    if (periodFilter === "TODAY") {
-      return p.payout_date.startsWith(todayStr);
-    } else if (periodFilter === "WEEK") {
-      return p.payout_date.slice(0, 10) >= oneWeekAgo;
-    } else if (periodFilter === "MONTH") {
-      return p.payout_date.startsWith(currentMonthStr);
-    }
-    return true; // ALL
-  });
+  const periodFilteredPayouts = payouts.filter((p) =>
+    isDateInPKTPeriod(p.payout_date || p.created_at, periodFilter)
+  );
+  const todayPayouts = payouts.filter(
+    (p) => parseDateToPKT(p.payout_date || p.created_at) === todayPKT
+  );
 
   const totalDisbursedPeriod = periodFilteredPayouts.reduce((sum, p) => sum + p.amount_paisa, 0);
-  const totalToday = payouts.filter((p) => p.payout_date.startsWith(todayStr)).reduce((sum, p) => sum + p.amount_paisa, 0);
+  const totalToday = todayPayouts.reduce((sum, p) => sum + p.amount_paisa, 0);
   const totalCashPayouts = periodFilteredPayouts.filter((p) => p.payment_method === "CASH").reduce((sum, p) => sum + p.amount_paisa, 0);
   const totalWalletPayouts = periodFilteredPayouts.filter((p) => p.payment_method !== "CASH").reduce((sum, p) => sum + p.amount_paisa, 0);
 
@@ -358,7 +354,10 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
           <Button
             variant="primary"
             size="sm"
-            onClick={() => setIsModalOpen(true)}
+            onClick={() => {
+              setPayoutDate(getPKTDate());
+              setIsModalOpen(true);
+            }}
             className="flex items-center gap-1.5 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950"
           >
             <Plus className="w-4 h-4" />
@@ -421,7 +420,7 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
             Rs. {formatPaisa(totalToday)}
           </div>
           <span className="text-[11px] text-slate-500 font-mono mt-0.5 block">
-            {payouts.filter((p) => p.payout_date.startsWith(todayStr)).length} payouts today
+            {todayPayouts.length} payouts today
           </span>
         </div>
 
@@ -559,7 +558,8 @@ export const EmployeeSalaries: React.FC<EmployeeSalariesProps> = ({ currentUser 
                       {p.payout_id}
                     </td>
                     <td className="py-2.5 px-3 font-mono text-slate-600 dark:text-slate-400">
-                      {new Date(p.payout_date).toLocaleDateString()} {new Date(p.payout_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {new Date(p.payout_date).toLocaleDateString("en-PK", { timeZone: "Asia/Karachi" })}{" "}
+                      {new Date(p.payout_date).toLocaleTimeString("en-PK", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", hour12: true })}
                     </td>
                     <td className="py-2.5 px-3 font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
                       <UserCheck className="w-3.5 h-3.5 text-amber-500" />
