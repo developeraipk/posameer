@@ -7204,10 +7204,8 @@ impl DatabaseManager {
         ).unwrap_or((0, 0, 0, 0, 0));
 
         let mut period_gross = retail_gross + wholesale_gross + online_gross;
-        let mut period_discount = retail_discount + wholesale_discount + online_discount;
         let _period_net_raw = retail_net_raw + wholesale_net_raw + online_net_raw;
         let period_orders = retail_orders + wholesale_orders + online_orders_cnt;
-        let mut period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders;
 
         // Net sales after customer return refunds (Gross remains intact; Net = Gross - Discounts - Returns)
         let final_net_sales;
@@ -7426,7 +7424,7 @@ impl DatabaseManager {
                                     if let Some(exp_ref) = explicit_item_refund {
                                         exp_ref.min(item_net_for_ret)
                                     } else {
-                                        item_net_for_ret
+                                        (item_net_for_ret - o_deduct).max(0)
                                     }
                                 } else {
                                     item_net_for_ret
@@ -7699,10 +7697,10 @@ impl DatabaseManager {
         period_gross = category_sum_gross
             .max(period_gross)
             .max(retail_gross + wholesale_gross + online_items_gross_plus_deliv);
-        period_discount = retail_discount
+        let period_discount = retail_discount
             + wholesale_discount
             + online_discount.max(online_items_disc_total).max(online_cat_disc_sum);
-        period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders.max(online_items_disc_orders_cnt);
+        let period_discount_orders = retail_discount_orders + wholesale_discount_orders + online_discount_orders.max(online_items_disc_orders_cnt);
         final_net_sales = (period_gross - period_discount - period_refunds).max(0);
 
         // Category discount breakdown (Retail highest-item special discount + Wholesale + Online)
@@ -8289,33 +8287,34 @@ impl DatabaseManager {
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_cash_salaries: i64 = conn.query_row(
+        let _all_time_cash_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE UPPER(payment_method) = 'CASH';",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_ep_salaries: i64 = conn.query_row(
+        let _all_time_ep_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE (UPPER(payment_method) LIKE '%EASYPAISA%' OR UPPER(payment_method) LIKE '%EASY_PAISA%');",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_jc_salaries: i64 = conn.query_row(
+        let _all_time_jc_salaries: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM employee_salary_payouts WHERE (UPPER(payment_method) LIKE '%JAZZCASH%' OR UPPER(payment_method) LIKE '%JAZZ_CASH%');",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_drawer_expenses: i64 = conn.query_row(
+        let _all_time_drawer_expenses: i64 = conn.query_row(
             "SELECT COALESCE(SUM(amount_paisa), 0) FROM petty_expenses WHERE shift_id IS NOT NULL;",
             [],
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let all_time_cash_drawer_paisa = (all_time_gross_cash - all_time_cash_refunds - all_time_cash_salaries - all_time_drawer_expenses).max(0);
-        let all_time_easypaisa_paisa = (all_time_gross_ep - all_time_ep_refunds - all_time_ep_salaries).max(0);
-        let all_time_jazzcash_paisa = (all_time_gross_jc - all_time_jc_refunds - all_time_jc_salaries).max(0);
+        // Keep wallet balances aligned with Treasury channel receipts less customer refunds
+        let all_time_cash_drawer_paisa = (all_time_gross_cash - all_time_cash_refunds).max(0);
+        let all_time_easypaisa_paisa = (all_time_gross_ep - all_time_ep_refunds).max(0);
+        let all_time_jazzcash_paisa = (all_time_gross_jc - all_time_jc_refunds).max(0);
 
         let (total_online_pending_paisa, online_pending_orders_count): (i64, i64) = conn.query_row(
             &format!(

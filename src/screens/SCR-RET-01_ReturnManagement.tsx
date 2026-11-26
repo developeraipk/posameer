@@ -280,6 +280,7 @@ export const ReturnManagement: React.FC<ReturnManagementProps> = ({ currentUser,
       await loadQuarantine();
       await loadHistory();
       await loadBalances();
+      window.dispatchEvent(new CustomEvent("app:refresh-data"));
     } catch (err) {
       console.error("Return processing failed:", err);
       alert(`Failed to process return: ${err}`);

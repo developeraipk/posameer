@@ -269,11 +269,20 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     );
   }, [filteredSales]);
 
+  // Honor exact return voucher refunds (after damage deductions) instead of overwriting with full invoice net_payable_paisa
+  const voucherInvoiceNumbers = new Set(
+    returnHistory
+      .map((r) => r.original_invoice_number)
+      .filter((num): num is string => Boolean(num))
+  );
   const totalRetailReturnsFromHistoryPaisa = filteredReturnHistory.reduce(
     (acc, r) => acc + (r.total_refund_amount_paisa || 0),
     0
   );
-  const totalRetailReturnsFromSalesPaisa = returnedSalesInvoices.reduce((acc, s) => {
+  const orphanReturnedSalesInvoices = returnedSalesInvoices.filter(
+    (s) => !voucherInvoiceNumbers.has(s.invoice_number)
+  );
+  const totalRetailReturnsFromOrphanSalesPaisa = orphanReturnedSalesInvoices.reduce((acc, s) => {
     const retUnits = s.returned_units || 0;
     if (s.return_status === "FULL" || (s.total_units > 0 && retUnits >= s.total_units)) {
       return acc + s.net_payable_paisa;
@@ -284,8 +293,10 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     return acc + s.net_payable_paisa;
   }, 0);
 
-  const totalRetailReturnsPaisa = Math.max(totalRetailReturnsFromHistoryPaisa, totalRetailReturnsFromSalesPaisa);
-  const totalRetailReturnsCount = Math.max(filteredReturnHistory.length, returnedSalesInvoices.length);
+  const totalRetailReturnsPaisa =
+    totalRetailReturnsFromHistoryPaisa + totalRetailReturnsFromOrphanSalesPaisa;
+  const totalRetailReturnsCount =
+    filteredReturnHistory.length + orphanReturnedSalesInvoices.length;
 
   // Retail Sales Metrics:
   // Gross sales before any discounts or returns (100% Unadjusted)
