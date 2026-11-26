@@ -36,6 +36,12 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
               )
             )}
             {...props}
+            onWheel={(e) => {
+              if (props.type === "number") {
+                e.currentTarget.blur();
+              }
+              props.onWheel?.(e);
+            }}
           />
         </div>
         {error && <p className="text-[11px] text-rose-500 dark:text-rose-400">{error}</p>}

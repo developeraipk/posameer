@@ -109,9 +109,9 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
   const [custCity, setCustCity] = useState("");
   const [custAddress, setCustAddress] = useState("");
   const [orderItems, setOrderItems] = useState<OnlineOrderItem[]>([]);
-  const [deliveryCharges, setDeliveryCharges] = useState("0");
-  const [discountRupees, setDiscountRupees] = useState("0");
-  const [advancePaidRupees, setAdvancePaidRupees] = useState("0");
+  const [deliveryCharges, setDeliveryCharges] = useState("");
+  const [discountRupees, setDiscountRupees] = useState("");
+  const [advancePaidRupees, setAdvancePaidRupees] = useState("");
   const [courierPartner, setCourierPartner] = useState(COURIER_PARTNERS[0]);
   const [trackingNumber, setTrackingNumber] = useState("");
   const [custodian, setCustodian] = useState<"COURIER" | "STAFF_HANDLER">("COURIER");
@@ -156,6 +156,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
   const [refundDeductionRupees, setRefundDeductionRupees] = useState("0");
   const [refundPaymentMethod, setRefundPaymentMethod] = useState("CASH");
   const [includeDeliveryInReturn, setIncludeDeliveryInReturn] = useState(false);
+  const [deliveryReturnRupees, setDeliveryReturnRupees] = useState("");
 
   // Status Update State
   const [updateDeliveryStatus, setUpdateDeliveryStatus] = useState("DISPATCHED");
@@ -627,9 +628,9 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
     setCustCity("");
     setCustAddress("");
     setOrderItems([]);
-    setDeliveryCharges("0");
-    setDiscountRupees("0");
-    setAdvancePaidRupees("0");
+    setDeliveryCharges("");
+    setDiscountRupees("");
+    setAdvancePaidRupees("");
     setTrackingNumber("");
     setOrderNotes("");
   };
@@ -729,6 +730,9 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
 
     const netPaidSoFar = Math.max(0, (order.advance_paid_paisa || 0) - (order.refund_amount_paisa || 0));
     setIncludeDeliveryInReturn(false);
+    setDeliveryReturnRupees(
+      order.delivery_charges_paisa > 0 ? Math.round(order.delivery_charges_paisa / 100).toString() : ""
+    );
     if (netPaidSoFar > 0) {
       setRefundMode("FULL");
       setRefundDeductionRupees("0");
@@ -759,10 +763,15 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
       return it.selected && it.returnQty === it.maxQty;
     });
 
+    const calcDeliveryReturnPaisa = (orderDelivPaisa: number) =>
+      includeDeliveryInReturn
+        ? Math.min(orderDelivPaisa, Math.max(0, Math.round((parseFloat(deliveryReturnRupees) || 0) * 100)))
+        : 0;
+
     const netPaidSoFar = Math.max(0, (selectedOrder.advance_paid_paisa || 0) - (selectedOrder.refund_amount_paisa || 0));
     const returnedItemsValuePaisa = selectedReturns.reduce((sum, s) => sum + s.returnQty * s.unitPricePaisa, 0);
     const deliveryChargesPaisa = Math.max(0, selectedOrder.delivery_charges_paisa || 0);
-    const deliveryReturnPaisa = includeDeliveryInReturn ? deliveryChargesPaisa : 0;
+    const deliveryReturnPaisa = calcDeliveryReturnPaisa(deliveryChargesPaisa);
     const totalReturnableValuePaisa = returnedItemsValuePaisa + deliveryReturnPaisa;
     const maxRefundPossible = Math.min(netPaidSoFar, totalReturnableValuePaisa);
 
@@ -853,9 +862,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
 
       const remainingDeliveryPaisa = isAllReturned
         ? 0
-        : includeDeliveryInReturn
-        ? 0
-        : deliveryChargesPaisa;
+        : Math.max(0, deliveryChargesPaisa - deliveryReturnPaisa);
 
       const newTotalPaisa = isAllReturned
         ? 0
@@ -2522,8 +2529,12 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                     <div className="w-24">
                       <Input
                         type="number"
+                        min={0}
+                        step="1"
+                        placeholder="0"
                         value={deliveryCharges}
-                        onChange={(e) => setDeliveryCharges(e.target.value)}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setDeliveryCharges(e.target.value.replace(/^0+(?=\d)/, ""))}
                         className="h-7 text-xs text-right font-mono"
                       />
                     </div>
@@ -2534,10 +2545,13 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                     <div className="w-24">
                       <Input
                         type="number"
-                        value={discountRupees}
-                        onChange={(e) => setDiscountRupees(e.target.value)}
-                        className="h-7 text-xs text-right font-mono text-rose-500"
+                        min={0}
+                        step="1"
                         placeholder="0"
+                        value={discountRupees}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setDiscountRupees(e.target.value.replace(/^0+(?=\d)/, ""))}
+                        className="h-7 text-xs text-right font-mono text-rose-500"
                       />
                     </div>
                   </div>
@@ -2559,10 +2573,13 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                     <div className="w-28">
                       <Input
                         type="number"
-                        value={advancePaidRupees}
-                        onChange={(e) => setAdvancePaidRupees(e.target.value)}
-                        className="h-7 text-xs text-right font-mono font-bold text-emerald-600 dark:text-emerald-400"
+                        min={0}
+                        step="1"
                         placeholder="0"
+                        value={advancePaidRupees}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setAdvancePaidRupees(e.target.value.replace(/^0+(?=\d)/, ""))}
+                        className="h-7 text-xs text-right font-mono font-bold text-emerald-600 dark:text-emerald-400"
                       />
                     </div>
                   </div>
@@ -2836,7 +2853,9 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                 const selectedItems = returnItemSelections.filter((it) => it.selected && it.returnQty > 0);
                 const returnedValPaisa = selectedItems.reduce((sum, s) => sum + s.returnQty * s.unitPricePaisa, 0);
                 const deliveryChargesPaisa = Math.max(0, selectedOrder.delivery_charges_paisa || 0);
-                const deliveryReturnPaisa = includeDeliveryInReturn ? deliveryChargesPaisa : 0;
+                const deliveryReturnPaisa = includeDeliveryInReturn
+                  ? Math.min(deliveryChargesPaisa, Math.max(0, Math.round((parseFloat(deliveryReturnRupees) || 0) * 100)))
+                  : 0;
                 const totalReturnValPaisa = returnedValPaisa + deliveryReturnPaisa;
                 const netPaidSoFar = Math.max(0, (selectedOrder.advance_paid_paisa || 0) - (selectedOrder.refund_amount_paisa || 0));
                 const maxRefundEligible = Math.min(netPaidSoFar, totalReturnValPaisa);
@@ -2852,33 +2871,66 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                 return (
                   <>
                     {deliveryChargesPaisa > 0 && (
-                      <label className="flex items-start gap-2.5 p-3 rounded-xl border border-amber-500/30 bg-amber-500/5 hover:bg-amber-500/10 cursor-pointer select-none transition-colors">
-                        <input
-                          type="checkbox"
-                          checked={includeDeliveryInReturn}
-                          onChange={(e) => setIncludeDeliveryInReturn(e.target.checked)}
-                          className="mt-0.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer shrink-0"
-                        />
-                        <div className="flex-1 text-xs">
-                          <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center justify-between gap-2">
-                            <span>Also Return / Refund Delivery Charges</span>
-                            <span className="font-mono text-amber-700 dark:text-amber-400">
-                              +Rs. {formatRs(deliveryChargesPaisa)}
-                            </span>
+                      <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-2 transition-colors">
+                        <label className="flex items-start gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={includeDeliveryInReturn}
+                            onChange={(e) => {
+                              const checked = e.target.checked;
+                              setIncludeDeliveryInReturn(checked);
+                              if (checked && (!deliveryReturnRupees || parseFloat(deliveryReturnRupees) <= 0)) {
+                                setDeliveryReturnRupees(Math.round(deliveryChargesPaisa / 100).toString());
+                              }
+                            }}
+                            className="mt-0.5 rounded border-slate-300 text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer shrink-0"
+                          />
+                          <div className="flex-1 text-xs">
+                            <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center justify-between gap-2">
+                              <span>Also Return / Refund Delivery Charges</span>
+                              <span className="font-mono text-amber-700 dark:text-amber-400">
+                                {includeDeliveryInReturn
+                                  ? `+Rs. ${formatRs(deliveryReturnPaisa)}`
+                                  : `Order Fee: Rs. ${formatRs(deliveryChargesPaisa)}`}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">
+                              {includeDeliveryInReturn
+                                ? `Delivery fee (Rs. ${formatRs(deliveryReturnPaisa)}) IS included in return/refund (Total return: Rs. ${formatRs(totalReturnValPaisa)}).`
+                                : `Only products (Rs. ${formatRs(returnedValPaisa)}) are returned; Rs. ${formatRs(deliveryChargesPaisa)} courier delivery fee is NOT returned.`}
+                            </p>
                           </div>
-                          <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-0.5">
-                            {includeDeliveryInReturn
-                              ? `Delivery fee (Rs. ${formatRs(deliveryChargesPaisa)}) IS included in return/refund (Total return: Rs. ${formatRs(totalReturnValPaisa)}).`
-                              : `Only products (Rs. ${formatRs(returnedValPaisa)}) are returned; Rs. ${formatRs(deliveryChargesPaisa)} courier delivery fee is NOT returned.`}
-                          </p>
-                        </div>
-                      </label>
+                        </label>
+                        {includeDeliveryInReturn && (
+                          <div className="flex items-center justify-between gap-2 pl-6 pt-1 border-t border-amber-500/20 text-[11px]">
+                            <span className="font-semibold text-amber-800 dark:text-amber-300">
+                              Delivery Return Amount (PKR):
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <Input
+                                type="number"
+                                min={0}
+                                max={Math.round(deliveryChargesPaisa / 100)}
+                                step="1"
+                                placeholder="0"
+                                value={deliveryReturnRupees}
+                                onFocus={(e) => e.currentTarget.select()}
+                                onChange={(e) => setDeliveryReturnRupees(e.target.value.replace(/^0+(?=\d)/, ""))}
+                                className="h-7 w-24 text-xs text-right font-mono font-bold text-amber-700 dark:text-amber-300"
+                              />
+                              <span className="text-[10px] font-mono text-slate-500">
+                                / Rs. {formatRs(deliveryChargesPaisa)}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     )}
 
                     {netPaidSoFar <= 0 ? (
                       <div className="p-3 bg-slate-100 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-400">
                         ℹ️ No customer advance paid / payment recorded. Return value (Rs. {formatRs(totalReturnValPaisa)}
-                        {includeDeliveryInReturn && deliveryChargesPaisa > 0 ? ` incl. Rs. ${formatRs(deliveryChargesPaisa)} delivery` : ""}) will reduce pending COD receivable. No cash refund required.
+                        {includeDeliveryInReturn && deliveryReturnPaisa > 0 ? ` incl. Rs. ${formatRs(deliveryReturnPaisa)} delivery` : ""}) will reduce pending COD receivable. No cash refund required.
                       </div>
                     ) : (
                       <div className="p-3.5 bg-slate-50 dark:bg-slate-950 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3 font-sans">
@@ -2891,7 +2943,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                           </div>
                           <div>
                             <span className="text-slate-500 block text-[10px]">
-                              Selected Return Value {includeDeliveryInReturn && deliveryChargesPaisa > 0 ? "(+ Delivery)" : "(Products Only)"}:
+                              Selected Return Value {includeDeliveryInReturn && deliveryReturnPaisa > 0 ? "(+ Delivery)" : "(Products Only)"}:
                             </span>
                             <span className="font-mono font-bold text-rose-600 dark:text-rose-400">
                               Rs. {formatRs(totalReturnValPaisa)}
