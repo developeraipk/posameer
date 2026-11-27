@@ -47,3 +47,6 @@ tsconfig.tsbuildinfo
 # Hostinger live cloud credentials & backups
 hostinger-cloud/config.php
 hostinger-cloud/backups/
+
+# Confidential local credential PDF exports
+*_Master_Credentials.pdf
