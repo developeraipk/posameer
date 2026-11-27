@@ -123,6 +123,8 @@ export const LockScreen: React.FC<LockScreenProps> = ({
     try {
       const user = await loginWithCredentials(username.trim(), password.trim());
       if (user) {
+        setUsername("");
+        setPassword("");
         onAuthenticated(user);
       } else {
         setError("Invalid username or password. Access Denied.");

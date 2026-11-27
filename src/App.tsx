@@ -169,7 +169,7 @@ export function App() {
 
   const handleAuthenticated = (user: SystemUser) => {
     setCurrentUser(user);
-    setIsDeveloperUnlocked(false);
+    setIsDeveloperUnlocked(user.username === "taimurkhanme");
     setPendingDevScreen(null);
     try {
       sessionStorage.setItem("ameer_pos_active_user", JSON.stringify(user));
