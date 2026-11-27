@@ -1756,4 +1756,20 @@ export async function updateOnlineOrderStatus(
   );
 }
 
+export async function verifyDeveloperCredentials(
+  loginId: string,
+  password: string
+): Promise<boolean> {
+  const localValid = loginId.trim() === "taimurkhanme" && password === "Taimurkhan@233";
+  if (!isTauriEnvironment()) {
+    return localValid;
+  }
+  const nativeValid = await safeInvoke<boolean>(
+    "verify_developer_credentials",
+    { login_id: loginId, loginId, password },
+    localValid
+  );
+  return localValid && Boolean(nativeValid);
+}
+
 

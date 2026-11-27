@@ -187,7 +187,8 @@ pub fn run() {
             commands::create_online_order,
             commands::collect_online_order_payment,
             commands::mark_online_order_return,
-            commands::update_online_order_status
+            commands::update_online_order_status,
+            commands::verify_developer_credentials
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ameer Perfumes ERP desktop application");

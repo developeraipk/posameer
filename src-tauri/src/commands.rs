@@ -1310,3 +1310,19 @@ pub fn update_online_order_status(
     let db = DatabaseManager::new();
     db.update_online_order_status(&oid, &status, track.as_deref(), courier.as_deref())
 }
+
+// Immutable hardcoded developer credentials for restricted Admin maintenance modules
+const DEVELOPER_LOGIN_ID: &str = "taimurkhanme";
+const DEVELOPER_LOGIN_PASS: &str = "Taimurkhan@233";
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn verify_developer_credentials(
+    login_id: Option<String>,
+    loginId: Option<String>,
+    password: Option<String>,
+) -> bool {
+    let id = login_id.or(loginId).unwrap_or_default();
+    let pass = password.unwrap_or_default();
+    id.trim() == DEVELOPER_LOGIN_ID && pass == DEVELOPER_LOGIN_PASS
+}

@@ -24,7 +24,12 @@ import { getWorkstationStatus, getNetworkStationConfig } from "@/lib/tauri-bridg
 import { configService } from "@/lib/config";
 import { usePOSStore } from "@/store/pos-store";
 import { getInitialTheme, applyTheme } from "@/lib/theme";
-import { ShieldAlert } from "lucide-react";
+import { ShieldAlert, Lock, Terminal } from "lucide-react";
+import {
+  DeveloperAccessGate,
+  DEVELOPER_ONLY_SCREENS,
+  DEVELOPER_SCREEN_LABELS,
+} from "@/components/auth/DeveloperAccessGate";
 
 export function App() {
   // Session persistence: restore authenticated session across window reloads / F5 / Ctrl+R
@@ -47,12 +52,17 @@ export function App() {
   });
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>(() => {
     try {
-      const savedScreen = sessionStorage.getItem("ameer_pos_active_screen");
-      return (savedScreen as ActiveScreen) || "POS";
+      const savedScreen = sessionStorage.getItem("ameer_pos_active_screen") as ActiveScreen | null;
+      if (savedScreen && !DEVELOPER_ONLY_SCREENS.includes(savedScreen)) {
+        return savedScreen;
+      }
+      return "POS";
     } catch {
       return "POS";
     }
   });
+  const [isDeveloperUnlocked, setIsDeveloperUnlocked] = useState<boolean>(false);
+  const [pendingDevScreen, setPendingDevScreen] = useState<ActiveScreen | null>(null);
   const currentUserRef = useRef<SystemUser | null>(null);
   currentUserRef.current = currentUser;
 
@@ -132,6 +142,8 @@ export function App() {
         if (currentUserRef.current) {
           setLockedUser(currentUserRef.current);
         }
+        setIsDeveloperUnlocked(false);
+        setPendingDevScreen(null);
         setIsLocked(true);
       } else if (e.key === "F5" || ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"))) {
         e.preventDefault();
@@ -157,6 +169,8 @@ export function App() {
 
   const handleAuthenticated = (user: SystemUser) => {
     setCurrentUser(user);
+    setIsDeveloperUnlocked(false);
+    setPendingDevScreen(null);
     try {
       sessionStorage.setItem("ameer_pos_active_user", JSON.stringify(user));
     } catch (e) {
@@ -165,8 +179,8 @@ export function App() {
     const wasLocked = lockedUser !== null;
     setLockedUser(null);
     setIsLocked(false);
-    // If not resuming an existing locked session, set starting screen based on role
-    if (!wasLocked) {
+    // If not resuming an existing locked session, or if returning to a developer-only screen, land safely
+    if (!wasLocked || DEVELOPER_ONLY_SCREENS.includes(activeScreen)) {
       const targetScreen: ActiveScreen = user.role === "OWNER" ? "OWNER_DASHBOARD" : "POS";
       setActiveScreen(targetScreen);
       try {
@@ -177,12 +191,16 @@ export function App() {
 
   const handleLockTerminal = () => {
     setLockedUser(currentUser);
+    setIsDeveloperUnlocked(false);
+    setPendingDevScreen(null);
     setIsLocked(true);
   };
 
   const handleLogout = () => {
     setCurrentUser(null);
     setLockedUser(null);
+    setIsDeveloperUnlocked(false);
+    setPendingDevScreen(null);
     setIsLocked(true);
     try {
       sessionStorage.removeItem("ameer_pos_active_user");
@@ -190,6 +208,27 @@ export function App() {
     } catch (e) {
       console.warn("Could not clear session:", e);
     }
+  };
+
+  const navigateToScreen = (screen: ActiveScreen) => {
+    if (DEVELOPER_ONLY_SCREENS.includes(screen) && !isDeveloperUnlocked) {
+      setPendingDevScreen(screen);
+      return;
+    }
+    setActiveScreen(screen);
+    try {
+      sessionStorage.setItem("ameer_pos_active_screen", screen);
+    } catch {}
+  };
+
+  const lockDeveloperAccess = () => {
+    setIsDeveloperUnlocked(false);
+    setPendingDevScreen(null);
+    const fallbackScreen: ActiveScreen = currentUser?.role === "OWNER" ? "OWNER_DASHBOARD" : "POS";
+    setActiveScreen(fallbackScreen);
+    try {
+      sessionStorage.setItem("ameer_pos_active_screen", fallbackScreen);
+    } catch {}
   };
 
   const handleNavigateToPOS = (product?: FinishedProduct) => {
@@ -256,12 +295,8 @@ export function App() {
         status={status}
         storeConfig={storeConfig}
         activeScreen={activeScreen}
-        onNavigate={(screen) => {
-          setActiveScreen(screen);
-          try {
-            sessionStorage.setItem("ameer_pos_active_screen", screen);
-          } catch {}
-        }}
+        isDeveloperUnlocked={isDeveloperUnlocked}
+        onNavigate={navigateToScreen}
         onLockTerminal={handleLockTerminal}
         onLogout={handleLogout}
         onRefreshStatus={refreshStatus}
@@ -334,20 +369,41 @@ export function App() {
             <OwnerDashboard currentUser={currentUser} status={status} />
           </div>
         )}
-        {activeScreen === "SYNC_CENTER" && (
-          <div className="flex-1 overflow-y-auto min-w-0">
-            <SyncCenter currentUser={currentUser} status={status} />
-          </div>
-        )}
-        {activeScreen === "BACKUP" && (
-          <div className="flex-1 overflow-y-auto min-w-0">
-            <BackupDisasterRecovery currentUser={currentUser} status={status} />
-          </div>
-        )}
-        {activeScreen === "HARDWARE" && (
-          <div className="flex-1 overflow-y-auto min-w-0">
-            <HardwareSettings currentUser={currentUser} status={status} />
-          </div>
+        {DEVELOPER_ONLY_SCREENS.includes(activeScreen) && (
+          isDeveloperUnlocked ? (
+            <div className="flex-1 flex flex-col min-h-0 min-w-0">
+              <div className="px-4 py-2 bg-slate-900 text-slate-100 border-b border-amber-500/30 flex items-center justify-between gap-3 text-xs shrink-0">
+                <div className="flex items-center gap-2 font-mono">
+                  <Terminal className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="font-bold text-amber-400">DEVELOPER MODE</span>
+                  <span className="text-slate-400 hidden sm:inline">•</span>
+                  <span className="text-slate-300 hidden sm:inline">
+                    {DEVELOPER_SCREEN_LABELS[activeScreen] || activeScreen}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={lockDeveloperAccess}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 font-semibold cursor-pointer transition-colors"
+                >
+                  <Lock className="w-3 h-3" />
+                  <span>Lock Developer Access</span>
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto min-w-0">
+                {activeScreen === "SYNC_CENTER" && <SyncCenter currentUser={currentUser} status={status} />}
+                {activeScreen === "BACKUP" && <BackupDisasterRecovery currentUser={currentUser} status={status} />}
+                {activeScreen === "HARDWARE" && <HardwareSettings currentUser={currentUser} status={status} />}
+              </div>
+            </div>
+          ) : (
+            <DeveloperAccessGate
+              mode="screen"
+              targetScreen={activeScreen}
+              onSuccess={() => setIsDeveloperUnlocked(true)}
+              onCancel={lockDeveloperAccess}
+            />
+          )
         )}
         {activeScreen === "SYSTEM_HEALTH" && (
           <div className="flex-1 overflow-y-auto min-w-0">
@@ -365,6 +421,24 @@ export function App() {
           </div>
         )}
       </main>
+
+      {/* Developer Only Authentication Modal for Restricted Admin Screens */}
+      {pendingDevScreen && !isDeveloperUnlocked && (
+        <DeveloperAccessGate
+          mode="modal"
+          targetScreen={pendingDevScreen}
+          onSuccess={() => {
+            const target = pendingDevScreen;
+            setIsDeveloperUnlocked(true);
+            setPendingDevScreen(null);
+            setActiveScreen(target);
+            try {
+              sessionStorage.setItem("ameer_pos_active_screen", target);
+            } catch {}
+          }}
+          onCancel={() => setPendingDevScreen(null)}
+        />
+      )}
 
       {/* Luxury PIN Staff Login Screen Modal (SCR-AUTH-01) */}
       {isLocked && (

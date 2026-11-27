@@ -52,6 +52,7 @@ interface NavbarProps {
   status: WorkstationStatus;
   storeConfig: StoreConfig;
   activeScreen: ActiveScreen;
+  isDeveloperUnlocked?: boolean;
   onNavigate: (screen: ActiveScreen) => void;
   onLockTerminal: () => void;
   onLogout?: () => void;
@@ -63,6 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   status,
   storeConfig,
   activeScreen,
+  isDeveloperUnlocked = false,
   onNavigate,
   onLockTerminal,
   onLogout,
@@ -653,50 +655,63 @@ export const Navbar: React.FC<NavbarProps> = ({
                       </div>
                     </button>
 
-                    <button
-                      onClick={() => handleSelectScreen("SYNC_CENTER")}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors text-left ${
-                        activeScreen === "SYNC_CENTER"
-                          ? "bg-amber-500 text-slate-950 font-semibold"
-                          : "text-slate-700 dark:text-slate-300 hover:bg-amber-500/10 hover:text-amber-900 dark:hover:text-amber-200"
-                      }`}
-                    >
-                      <ArrowRightLeft className="w-4 h-4 text-sky-500 shrink-0" />
-                      <div>
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">P2P LAN Mesh Sync</div>
-                        <div className="text-[10px] opacity-75">Station 1 & 2 replication</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => handleSelectScreen("BACKUP")}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors text-left ${
-                        activeScreen === "BACKUP"
-                          ? "bg-amber-500 text-slate-950 font-semibold"
-                          : "text-slate-700 dark:text-slate-300 hover:bg-amber-500/10 hover:text-amber-900 dark:hover:text-amber-200"
-                      }`}
-                    >
-                      <FolderArchive className="w-4 h-4 text-amber-500 shrink-0" />
-                      <div>
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">Hot Backups & DR</div>
-                        <div className="text-[10px] opacity-75">Atomic snapshot & restore</div>
-                      </div>
-                    </button>
-
-                    <button
-                      onClick={() => handleSelectScreen("HARDWARE")}
-                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors text-left ${
-                        activeScreen === "HARDWARE"
-                          ? "bg-amber-500 text-slate-950 font-semibold"
-                          : "text-slate-700 dark:text-slate-300 hover:bg-amber-500/10 hover:text-amber-900 dark:hover:text-amber-200"
-                      }`}
-                    >
-                      <Printer className="w-4 h-4 text-emerald-500 shrink-0" />
-                      <div>
-                        <div className="font-semibold text-slate-900 dark:text-slate-100">Receipt & Store Settings</div>
-                        <div className="text-[10px] opacity-75">Branch address & receipt header</div>
-                      </div>
-                    </button>
+                    {[
+                      {
+                        screen: "SYNC_CENTER" as ActiveScreen,
+                        title: "P2P LAN Mesh Sync",
+                        subtitle: "Station 1 & 2 replication",
+                        icon: ArrowRightLeft,
+                        iconColor: "text-sky-500",
+                      },
+                      {
+                        screen: "BACKUP" as ActiveScreen,
+                        title: "Hot Backups & DR",
+                        subtitle: "Atomic snapshot & restore",
+                        icon: FolderArchive,
+                        iconColor: "text-amber-500",
+                      },
+                      {
+                        screen: "HARDWARE" as ActiveScreen,
+                        title: "Receipt & Store Settings",
+                        subtitle: "Branch address & receipt header",
+                        icon: Printer,
+                        iconColor: "text-emerald-500",
+                      },
+                    ].map((devItem) => {
+                      const DevIcon = devItem.icon;
+                      const isActive = activeScreen === devItem.screen;
+                      return (
+                        <button
+                          key={devItem.screen}
+                          onClick={() => handleSelectScreen(devItem.screen)}
+                          className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-medium transition-colors text-left cursor-pointer ${
+                            isActive
+                              ? "bg-amber-500 text-slate-950 font-semibold"
+                              : "text-slate-700 dark:text-slate-300 hover:bg-amber-500/10 hover:text-amber-900 dark:hover:text-amber-200"
+                          }`}
+                        >
+                          <DevIcon className={`w-4 h-4 ${isActive ? "text-slate-950" : devItem.iconColor} shrink-0`} />
+                          <div className="min-w-0 flex-1">
+                            <div className={`font-semibold ${isActive ? "text-slate-950" : "text-slate-900 dark:text-slate-100"}`}>
+                              {devItem.title}
+                            </div>
+                            <div className="text-[10px] opacity-75">{devItem.subtitle}</div>
+                          </div>
+                          <span
+                            className={`inline-flex items-center gap-0.5 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded-md shrink-0 ${
+                              isDeveloperUnlocked
+                                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30"
+                                : isActive
+                                ? "bg-slate-950/15 text-slate-950 border border-slate-950/20"
+                                : "bg-rose-500/10 text-rose-700 dark:text-rose-400 border border-rose-500/30"
+                            }`}
+                          >
+                            <Lock className="w-2.5 h-2.5" />
+                            <span>{isDeveloperUnlocked ? "DEV" : "LOCKED"}</span>
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
