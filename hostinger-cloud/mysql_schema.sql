@@ -9,6 +9,7 @@ SET time_zone = '+05:00';
 
 CREATE TABLE IF NOT EXISTS cloud_terminal_nodes (
     terminal_id VARCHAR(32) PRIMARY KEY,
+    branch_name VARCHAR(160) NOT NULL DEFAULT '',
     station_role VARCHAR(32) NOT NULL DEFAULT 'PRIMARY_SERVER',
     lan_ip VARCHAR(64) NOT NULL DEFAULT '',
     last_heartbeat_at DATETIME NOT NULL,
@@ -90,6 +91,7 @@ CREATE TABLE IF NOT EXISTS cloud_sales_invoices (
     tester_sales_paisa BIGINT NOT NULL DEFAULT 0,
     payment_method VARCHAR(64) NOT NULL DEFAULT 'CASH',
     items_summary TEXT NULL,
+    salesperson_name VARCHAR(128) NOT NULL DEFAULT '',
     total_units INT NOT NULL DEFAULT 0,
     invoice_date VARCHAR(64) NOT NULL,
     is_voided TINYINT(1) NOT NULL DEFAULT 0,
@@ -134,9 +136,16 @@ CREATE TABLE IF NOT EXISTS cloud_online_orders (
     delivery_status VARCHAR(32) NOT NULL DEFAULT 'BOOKED',
     refund_amount_paisa BIGINT NOT NULL DEFAULT 0,
     deduction_amount_paisa BIGINT NOT NULL DEFAULT 0,
+    terminal_id VARCHAR(32) NOT NULL DEFAULT 'POS-01',
+    collected_at VARCHAR(64) NULL,
+    collection_method VARCHAR(64) NULL,
+    return_reason TEXT NULL,
+    notes TEXT NULL,
     created_at VARCHAR(64) NOT NULL,
     synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     KEY idx_oo_created (created_at),
+    KEY idx_oo_channel (channel),
+    KEY idx_oo_terminal (terminal_id),
     KEY idx_oo_status (delivery_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -165,9 +174,11 @@ CREATE TABLE IF NOT EXISTS cloud_wholesale_invoices (
     balance_due_paisa BIGINT NOT NULL DEFAULT 0,
     payment_status VARCHAR(32) NOT NULL DEFAULT 'UNPAID',
     invoice_date VARCHAR(64) NOT NULL,
+    terminal_id VARCHAR(32) NOT NULL DEFAULT 'POS-01',
     is_voided TINYINT(1) NOT NULL DEFAULT 0,
     synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    KEY idx_wi_date (invoice_date)
+    KEY idx_wi_date (invoice_date),
+    KEY idx_wi_terminal (terminal_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS cloud_petty_expenses (
@@ -178,8 +189,10 @@ CREATE TABLE IF NOT EXISTS cloud_petty_expenses (
     description TEXT NULL,
     recipient_payee VARCHAR(255) NOT NULL DEFAULT '',
     authorized_by_name VARCHAR(255) NULL,
+    terminal_id VARCHAR(32) NOT NULL DEFAULT 'POS-01',
     synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    KEY idx_pe_date (expense_date)
+    KEY idx_pe_date (expense_date),
+    KEY idx_pe_terminal (terminal_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS cloud_employee_salaries (
@@ -191,8 +204,10 @@ CREATE TABLE IF NOT EXISTS cloud_employee_salaries (
     payment_method VARCHAR(32) NOT NULL DEFAULT 'CASH',
     payout_date VARCHAR(64) NOT NULL,
     notes TEXT NULL,
+    terminal_id VARCHAR(32) NOT NULL DEFAULT 'POS-01',
     synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    KEY idx_sal_date (payout_date)
+    KEY idx_sal_date (payout_date),
+    KEY idx_sal_terminal (terminal_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS cloud_cash_shifts (

@@ -48,6 +48,10 @@ pub struct CloudSyncEventPayload {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct CloudSyncPushPayload {
     pub terminal_id: String,
+    #[serde(default)]
+    pub branch_name: String,
+    #[serde(default)]
+    pub station_role: String,
     pub app_version: String,
     pub watermark_sequence: i64,
     pub sync_trigger_reason: String,
@@ -317,8 +321,21 @@ impl CloudSyncClient {
                 break;
             }
 
+            let cfg_snap = ConfigManager::new().load_or_create();
+            let branch_label = format!("{} ({})", cfg_snap.store_name.trim(), cfg_snap.city.trim())
+                .trim_end_matches(" ()")
+                .to_string();
+            let role_label = if cfg_snap.is_primary_server {
+                "PRIMARY_SERVER"
+            } else {
+                "CLIENT_PEER"
+            }
+            .to_string();
+
             let push_payload = CloudSyncPushPayload {
                 terminal_id: self.terminal_id.clone(),
+                branch_name: branch_label,
+                station_role: role_label,
                 app_version: env!("CARGO_PKG_VERSION").to_string(),
                 watermark_sequence: max_seq,
                 sync_trigger_reason: trigger_reason.to_string(),
@@ -518,6 +535,50 @@ impl CloudSyncClient {
             }
         }
         Ok(push_res)
+    }
+
+    pub fn send_heartbeat(&self) -> Result<(), String> {
+        let parsed = self.ensure_ready()?;
+        let cfg = ConfigManager::new().load_or_create();
+        let lan_ip = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| {
+                s.connect("8.8.8.8:80")?;
+                s.local_addr()
+            })
+            .map(|a| a.ip().to_string())
+            .unwrap_or_default();
+        let branch_label = format!("{} ({})", cfg.store_name.trim(), cfg.city.trim())
+            .trim_end_matches(" ()")
+            .to_string();
+        let station_role = if cfg.is_primary_server {
+            "PRIMARY_SERVER"
+        } else {
+            "CLIENT_PEER"
+        };
+
+        let body_val = serde_json::json!({
+            "terminalId": self.terminal_id,
+            "branchName": branch_label,
+            "stationRole": station_role,
+            "lanIp": lan_ip,
+            "appVersion": env!("CARGO_PKG_VERSION"),
+        });
+        let json_body = serde_json::to_vec(&body_val).map_err(|e| e.to_string())?;
+        let path = self.build_object_path(&parsed, "sync/heartbeat");
+        let (status, _) = http_request(
+            &parsed,
+            "POST",
+            &path,
+            &self.auth_token,
+            "application/json",
+            &[],
+            &json_body,
+        )?;
+        if status >= 200 && status < 300 {
+            Ok(())
+        } else {
+            Err(format!("Heartbeat HTTP {}", status))
+        }
     }
 
     pub fn upload_backup_file(

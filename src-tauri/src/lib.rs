@@ -55,11 +55,15 @@ pub fn run() {
                     if let Err(e) = client.sync_bidirectional("AUTO_BACKGROUND_SYNC") {
                         eprintln!("Cloud background sync notice: {}", e);
                     }
+                    let _ = client.send_heartbeat();
                 } else if pending > 0 {
                     let client = cloud_sync::CloudSyncClient::from_config();
                     if let Err(e) = client.push_events("AUTO_RETRY_PENDING") {
                         eprintln!("Cloud pending retry notice: {}", e);
                     }
+                    let _ = client.send_heartbeat();
+                } else {
+                    let _ = cloud_sync::CloudSyncClient::from_config().send_heartbeat();
                 }
             }
             std::thread::sleep(std::time::Duration::from_secs(30));

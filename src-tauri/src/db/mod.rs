@@ -9316,10 +9316,14 @@ impl DatabaseManager {
             "SALES_INVOICE" => {
                 let main = conn
                     .query_row(
-                        "SELECT invoice_id, invoice_number, terminal_id, order_source, customer_phone,
-                                gross_total_paisa, item_discount_paisa, special_discount_paisa,
-                                net_payable_paisa, invoice_date, is_voided
-                         FROM sales_invoices WHERE invoice_id = ?;",
+                        "SELECT si.invoice_id, si.invoice_number, si.terminal_id, si.order_source, si.customer_phone,
+                                si.gross_total_paisa, si.item_discount_paisa, si.special_discount_paisa,
+                                si.net_payable_paisa, si.invoice_date, si.is_voided,
+                                COALESCE(sp.full_name, u.full_name, '') AS staff_name
+                         FROM sales_invoices si
+                         LEFT JOIN salespersons sp ON si.salesperson_id = sp.salesperson_id
+                         LEFT JOIN users u ON si.cashier_user_id = u.user_id
+                         WHERE si.invoice_id = ?;",
                         [entity_id],
                         |r| {
                             Ok((
@@ -9334,6 +9338,7 @@ impl DatabaseManager {
                                 r.get::<_, i64>(8)?,
                                 r.get::<_, String>(9)?,
                                 r.get::<_, i32>(10)?,
+                                r.get::<_, String>(11)?,
                             ))
                         },
                     )
@@ -9343,13 +9348,12 @@ impl DatabaseManager {
                     .query_row(
                         "SELECT
                             COALESCE(SUM(sii.unit_cost_paisa * sii.quantity), 0),
-                            COALESCE(SUM(CASE WHEN sii.item_type = 'PERFUME' AND COALESCE(fp.category, '') != 'TESTER' THEN sii.line_total_paisa ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND sii.item_type != 'TESTER' AND sii.measurement_unit != 'CUSTOM_ML' AND sii.product_name NOT LIKE '%Tester%' AND sii.product_name NOT LIKE '%Sample%' THEN sii.line_total_paisa ELSE 0 END), 0),
                             COALESCE(SUM(CASE WHEN sii.item_type = 'ATTAR' THEN sii.line_total_paisa ELSE 0 END), 0),
-                            COALESCE(SUM(CASE WHEN COALESCE(fp.category, '') = 'TESTER' THEN sii.line_total_paisa ELSE 0 END), 0),
+                            COALESCE(SUM(CASE WHEN sii.item_type != 'ATTAR' AND (sii.item_type = 'TESTER' OR sii.measurement_unit = 'CUSTOM_ML' OR sii.product_name LIKE '%Tester%' OR sii.product_name LIKE '%Sample%') THEN sii.line_total_paisa ELSE 0 END), 0),
                             COALESCE(SUM(sii.quantity), 0),
                             COALESCE(GROUP_CONCAT(sii.product_name || ' x' || sii.quantity, ', '), '')
                          FROM sales_invoice_items sii
-                         LEFT JOIN finished_products fp ON sii.finished_product_id = fp.product_id
                          WHERE sii.invoice_id = ?;",
                         [entity_id],
                         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
@@ -9384,6 +9388,7 @@ impl DatabaseManager {
                     "total_units": total_units,
                     "invoice_date": main.9,
                     "is_voided": main.10,
+                    "salesperson_name": main.11,
                 }))
             }
             "RETURN_VOUCHER" => conn
@@ -9415,7 +9420,8 @@ impl DatabaseManager {
                             items_json, subtotal_paisa, delivery_charges_paisa, discount_paisa,
                             total_amount_paisa, advance_paid_paisa, cod_balance_paisa, payment_status,
                             payment_custodian, courier_partner, tracking_number, delivery_status,
-                            COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0), created_at
+                            COALESCE(refund_amount_paisa, 0), COALESCE(deduction_amount_paisa, 0),
+                            collected_at, collection_method, return_reason, notes, created_at
                      FROM online_orders WHERE order_id = ?;",
                     [entity_id],
                     |r| {
@@ -9440,7 +9446,12 @@ impl DatabaseManager {
                             "delivery_status": r.get::<_, String>(17)?,
                             "refund_amount_paisa": r.get::<_, i64>(18)?,
                             "deduction_amount_paisa": r.get::<_, i64>(19)?,
-                            "created_at": r.get::<_, String>(20)?,
+                            "collected_at": r.get::<_, Option<String>>(20)?,
+                            "collection_method": r.get::<_, Option<String>>(21)?,
+                            "return_reason": r.get::<_, Option<String>>(22)?,
+                            "notes": r.get::<_, Option<String>>(23)?,
+                            "created_at": r.get::<_, String>(24)?,
+                            "terminal_id": Self::active_station_id(),
                         }))
                     },
                 )
@@ -9490,6 +9501,7 @@ impl DatabaseManager {
                             "payment_status": r.get::<_, String>(9)?,
                             "invoice_date": r.get::<_, String>(10)?,
                             "is_voided": r.get::<_, i32>(11)?,
+                            "terminal_id": Self::active_station_id(),
                         }))
                     },
                 )
@@ -9509,6 +9521,7 @@ impl DatabaseManager {
                             "description": r.get::<_, String>(4)?,
                             "recipient_payee": r.get::<_, String>(5)?,
                             "authorized_by_name": r.get::<_, Option<String>>(6)?,
+                            "terminal_id": Self::active_station_id(),
                         }))
                     },
                 )
@@ -9529,6 +9542,7 @@ impl DatabaseManager {
                             "payment_method": r.get::<_, String>(5)?,
                             "payout_date": r.get::<_, String>(6)?,
                             "notes": r.get::<_, Option<String>>(7)?,
+                            "terminal_id": Self::active_station_id(),
                         }))
                     },
                 )

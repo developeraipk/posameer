@@ -74,6 +74,7 @@ if ($suppliedToken === '' || !hash_equals($expectedToken, $suppliedToken)) {
 
 try {
     $pdo = ameer_get_pdo($cfg);
+    ameer_ensure_cloud_schema_upgrades($pdo);
 } catch (Throwable $e) {
     ameer_json_response([
         'status' => 'ERROR',
@@ -244,8 +245,8 @@ $projectEvent = static function (
                     gross_total_paisa, item_discount_paisa, special_discount_paisa,
                     net_payable_paisa, total_cost_paisa, perfume_sales_paisa,
                     attar_sales_paisa, tester_sales_paisa, payment_method,
-                    items_summary, total_units, invoice_date, is_voided
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    items_summary, salesperson_name, total_units, invoice_date, is_voided
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     invoice_number = VALUES(invoice_number),
                     terminal_id = VALUES(terminal_id),
@@ -261,6 +262,7 @@ $projectEvent = static function (
                     tester_sales_paisa = VALUES(tester_sales_paisa),
                     payment_method = VALUES(payment_method),
                     items_summary = VALUES(items_summary),
+                    salesperson_name = VALUES(salesperson_name),
                     total_units = VALUES(total_units),
                     invoice_date = VALUES(invoice_date),
                     is_voided = VALUES(is_voided)'
@@ -281,6 +283,7 @@ $projectEvent = static function (
                 $asInt($data, ['tester_sales_paisa', 'testerSalesPaisa'], 0),
                 $asStr($data, ['payment_method', 'paymentMethod'], 'CASH'),
                 $asNullableStr($data, ['items_summary', 'itemsSummary']),
+                $asStr($data, ['salesperson_name', 'salespersonName'], ''),
                 $asInt($data, ['total_units', 'totalUnits'], 0),
                 $asStr($data, ['invoice_date', 'invoiceDate'], $createdAt),
                 $asBoolInt($data, ['is_voided', 'isVoided'], 0),
@@ -338,8 +341,9 @@ $projectEvent = static function (
                     discount_paisa, total_amount_paisa, advance_paid_paisa,
                     cod_balance_paisa, payment_status, payment_custodian,
                     courier_partner, tracking_number, delivery_status,
-                    refund_amount_paisa, deduction_amount_paisa, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    refund_amount_paisa, deduction_amount_paisa, terminal_id,
+                    collected_at, collection_method, return_reason, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     order_number = VALUES(order_number),
                     channel = VALUES(channel),
@@ -360,6 +364,11 @@ $projectEvent = static function (
                     delivery_status = VALUES(delivery_status),
                     refund_amount_paisa = VALUES(refund_amount_paisa),
                     deduction_amount_paisa = VALUES(deduction_amount_paisa),
+                    terminal_id = VALUES(terminal_id),
+                    collected_at = VALUES(collected_at),
+                    collection_method = VALUES(collection_method),
+                    return_reason = VALUES(return_reason),
+                    notes = VALUES(notes),
                     created_at = VALUES(created_at)'
             );
             $stmt->execute([
@@ -383,6 +392,11 @@ $projectEvent = static function (
                 $asStr($data, ['delivery_status', 'deliveryStatus'], 'BOOKED'),
                 $asInt($data, ['refund_amount_paisa', 'refundAmountPaisa'], 0),
                 $asInt($data, ['deduction_amount_paisa', 'deductionAmountPaisa'], 0),
+                $asStr($data, ['terminal_id', 'terminalId'], $originTerminal),
+                $asNullableStr($data, ['collected_at', 'collectedAt']),
+                $asNullableStr($data, ['collection_method', 'collectionMethod']),
+                $asNullableStr($data, ['return_reason', 'returnReason']),
+                $asNullableStr($data, ['notes']),
                 $asStr($data, ['created_at', 'createdAt'], $createdAt),
             ]);
             break;
@@ -425,8 +439,8 @@ $projectEvent = static function (
                 'INSERT INTO cloud_wholesale_invoices (
                     wholesale_invoice_id, invoice_number, customer_id, customer_name,
                     subtotal_paisa, discount_paisa, net_total_paisa, amount_paid_paisa,
-                    balance_due_paisa, payment_status, invoice_date, is_voided
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    balance_due_paisa, payment_status, invoice_date, terminal_id, is_voided
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     invoice_number = VALUES(invoice_number),
                     customer_id = VALUES(customer_id),
@@ -438,6 +452,7 @@ $projectEvent = static function (
                     balance_due_paisa = VALUES(balance_due_paisa),
                     payment_status = VALUES(payment_status),
                     invoice_date = VALUES(invoice_date),
+                    terminal_id = VALUES(terminal_id),
                     is_voided = VALUES(is_voided)'
             );
             $stmt->execute([
@@ -452,6 +467,7 @@ $projectEvent = static function (
                 $asInt($data, ['balance_due_paisa', 'balanceDuePaisa'], 0),
                 $asStr($data, ['payment_status', 'paymentStatus'], 'UNPAID'),
                 $asStr($data, ['invoice_date', 'invoiceDate'], $createdAt),
+                $asStr($data, ['terminal_id', 'terminalId'], $originTerminal),
                 $asBoolInt($data, ['is_voided', 'isVoided'], 0),
             ]);
             break;
@@ -462,15 +478,16 @@ $projectEvent = static function (
             $stmt = $pdo->prepare(
                 'INSERT INTO cloud_petty_expenses (
                     expense_id, category, expense_date, amount_paisa,
-                    description, recipient_payee, authorized_by_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    description, recipient_payee, authorized_by_name, terminal_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     category = VALUES(category),
                     expense_date = VALUES(expense_date),
                     amount_paisa = VALUES(amount_paisa),
                     description = VALUES(description),
                     recipient_payee = VALUES(recipient_payee),
-                    authorized_by_name = VALUES(authorized_by_name)'
+                    authorized_by_name = VALUES(authorized_by_name),
+                    terminal_id = VALUES(terminal_id)'
             );
             $stmt->execute([
                 $id,
@@ -480,6 +497,7 @@ $projectEvent = static function (
                 $asNullableStr($data, ['description']),
                 $asStr($data, ['recipient_payee', 'recipientPayee'], ''),
                 $asNullableStr($data, ['authorized_by_name', 'authorizedByName']),
+                $asStr($data, ['terminal_id', 'terminalId'], $originTerminal),
             ]);
             break;
         }
@@ -489,8 +507,8 @@ $projectEvent = static function (
             $stmt = $pdo->prepare(
                 'INSERT INTO cloud_employee_salaries (
                     payout_id, employee_name, employee_role, payout_type,
-                    amount_paisa, payment_method, payout_date, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    amount_paisa, payment_method, payout_date, notes, terminal_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     employee_name = VALUES(employee_name),
                     employee_role = VALUES(employee_role),
@@ -498,7 +516,8 @@ $projectEvent = static function (
                     amount_paisa = VALUES(amount_paisa),
                     payment_method = VALUES(payment_method),
                     payout_date = VALUES(payout_date),
-                    notes = VALUES(notes)'
+                    notes = VALUES(notes),
+                    terminal_id = VALUES(terminal_id)'
             );
             $stmt->execute([
                 $id,
@@ -509,6 +528,7 @@ $projectEvent = static function (
                 $asStr($data, ['payment_method', 'paymentMethod'], 'CASH'),
                 $asStr($data, ['payout_date', 'payoutDate'], $createdAt),
                 $asNullableStr($data, ['notes']),
+                $asStr($data, ['terminal_id', 'terminalId'], $originTerminal),
             ]);
             break;
         }
@@ -554,7 +574,7 @@ $projectEvent = static function (
 // ----------------------------------------------------------------------------
 
 if ($method === 'GET' && $route === 'sync/status') {
-    $nodes = $pdo->query('SELECT terminal_id, station_role, lan_ip, last_heartbeat_at, last_sync_at, app_version, is_online FROM cloud_terminal_nodes ORDER BY terminal_id')->fetchAll();
+    $nodes = $pdo->query('SELECT terminal_id, branch_name, station_role, lan_ip, last_heartbeat_at, last_sync_at, app_version, is_online FROM cloud_terminal_nodes ORDER BY terminal_id')->fetchAll();
     $watermarks = $pdo->query('SELECT source_terminal_id, target_node_id, last_replicated_sequence, last_sync_timestamp FROM cloud_sync_watermarks ORDER BY source_terminal_id')->fetchAll();
     $totalEvents = (int)$pdo->query('SELECT COUNT(*) FROM cloud_sync_events')->fetchColumn();
     $latestEventId = (int)$pdo->query('SELECT COALESCE(MAX(id), 0) FROM cloud_sync_events')->fetchColumn();
@@ -572,6 +592,40 @@ if ($method === 'GET' && $route === 'sync/status') {
     ]);
 }
 
+if ($method === 'POST' && $route === 'sync/heartbeat') {
+    $body = json_decode(file_get_contents('php://input') ?: '{}', true);
+    if (!is_array($body)) {
+        $body = [];
+    }
+    $terminalId = trim((string)($body['terminalId'] ?? $body['terminal_id'] ?? 'POS-01'));
+    if ($terminalId === '') {
+        $terminalId = 'POS-01';
+    }
+    $branchName = trim((string)($body['branchName'] ?? $body['branch_name'] ?? ''));
+    $stationRole = trim((string)($body['stationRole'] ?? $body['station_role'] ?? ($terminalId === 'POS-01' ? 'PRIMARY_SERVER' : 'CLIENT_PEER')));
+    $lanIp = trim((string)($body['lanIp'] ?? $body['lan_ip'] ?? ''));
+    $appVersion = trim((string)($body['appVersion'] ?? $body['app_version'] ?? '4.4.8'));
+
+    $stmt = $pdo->prepare(
+        "INSERT INTO cloud_terminal_nodes (terminal_id, branch_name, station_role, lan_ip, last_heartbeat_at, app_version, is_online)
+         VALUES (?, ?, ?, ?, NOW(), ?, 1)
+         ON DUPLICATE KEY UPDATE
+             branch_name = CASE WHEN VALUES(branch_name) <> '' THEN VALUES(branch_name) ELSE branch_name END,
+             station_role = VALUES(station_role),
+             lan_ip = CASE WHEN VALUES(lan_ip) <> '' THEN VALUES(lan_ip) ELSE lan_ip END,
+             last_heartbeat_at = NOW(),
+             app_version = VALUES(app_version),
+             is_online = 1"
+    );
+    $stmt->execute([$terminalId, $branchName, $stationRole, $lanIp, $appVersion]);
+
+    ameer_json_response([
+        'status' => 'OK',
+        'terminalId' => $terminalId,
+        'serverTimestamp' => gmdate('c'),
+    ]);
+}
+
 if ($method === 'POST' && $route === 'sync/push') {
     $rawBody = file_get_contents('php://input');
     $body = json_decode($rawBody ?: '{}', true);
@@ -583,6 +637,8 @@ if ($method === 'POST' && $route === 'sync/push') {
     if ($terminalId === '') {
         $terminalId = 'POS-01';
     }
+    $branchName = trim((string)($body['branchName'] ?? $body['branch_name'] ?? ''));
+    $stationRole = trim((string)($body['stationRole'] ?? $body['station_role'] ?? ($terminalId === 'POS-01' ? 'PRIMARY_SERVER' : 'CLIENT_PEER')));
     $appVersion = trim((string)($body['appVersion'] ?? $body['app_version'] ?? '4.4.8'));
     $events = $body['events'] ?? [];
     if (!is_array($events)) {
@@ -597,16 +653,17 @@ if ($method === 'POST' && $route === 'sync/push') {
         $pdo->beginTransaction();
 
         $nodeStmt = $pdo->prepare(
-            "INSERT INTO cloud_terminal_nodes (terminal_id, station_role, last_heartbeat_at, last_sync_at, app_version, is_online)
-             VALUES (?, ?, NOW(), NOW(), ?, 1)
+            "INSERT INTO cloud_terminal_nodes (terminal_id, branch_name, station_role, last_heartbeat_at, last_sync_at, app_version, is_online)
+             VALUES (?, ?, ?, NOW(), NOW(), ?, 1)
              ON DUPLICATE KEY UPDATE
+                 branch_name = CASE WHEN VALUES(branch_name) <> '' THEN VALUES(branch_name) ELSE branch_name END,
+                 station_role = VALUES(station_role),
                  last_heartbeat_at = NOW(),
                  last_sync_at = NOW(),
                  app_version = VALUES(app_version),
                  is_online = 1"
         );
-        $role = ($terminalId === 'POS-01') ? 'PRIMARY_SERVER' : 'CLIENT_PEER';
-        $nodeStmt->execute([$terminalId, $role, $appVersion]);
+        $nodeStmt->execute([$terminalId, $branchName, $stationRole, $appVersion]);
 
         $insertEvtStmt = $pdo->prepare(
             "INSERT IGNORE INTO cloud_sync_events (
@@ -846,78 +903,32 @@ if ($method === 'POST' && $route === 'backup/upload') {
 
 if ($method === 'GET' && $route === 'owner/metrics') {
     $period = strtolower(trim((string)($_GET['period'] ?? 'today')));
-    if (!in_array($period, ['today', 'weekly', 'monthly', 'yearly', 'all'], true)) {
-        $period = 'today';
-    }
-
-    $wSales = ameer_period_where('invoice_date', $period);
-    $wRet   = ameer_period_where('return_date', $period);
-    $wExp   = ameer_period_where('expense_date', $period);
-    $wSal   = ameer_period_where('payout_date', $period);
-
-    $salesRow = $pdo->query(
-        "SELECT
-            COALESCE(SUM(gross_total_paisa), 0) AS gross_sales_paisa,
-            COALESCE(SUM(item_discount_paisa + special_discount_paisa), 0) AS discounts_paisa,
-            COALESCE(SUM(net_payable_paisa), 0) AS collected_sales_paisa,
-            COALESCE(SUM(total_cost_paisa), 0) AS cogs_paisa,
-            COALESCE(SUM(perfume_sales_paisa), 0) AS perfume_sales_paisa,
-            COALESCE(SUM(attar_sales_paisa), 0) AS attar_sales_paisa,
-            COALESCE(SUM(tester_sales_paisa), 0) AS tester_sales_paisa,
-            COUNT(*) AS invoice_count
-         FROM cloud_sales_invoices
-         WHERE is_voided = 0 AND {$wSales}"
-    )->fetch() ?: [];
-
-    $refundPaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(total_refund_amount_paisa), 0) FROM cloud_return_vouchers WHERE {$wRet}"
-    )->fetchColumn();
-
-    $expPaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(amount_paisa), 0) FROM cloud_petty_expenses WHERE {$wExp}"
-    )->fetchColumn();
-
-    $salPaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(amount_paisa), 0) FROM cloud_employee_salaries WHERE {$wSal}"
-    )->fetchColumn();
-
-    $receivablePaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(GREATEST(current_balance_paisa, 0)), 0) FROM cloud_wholesale_customers WHERE is_active = 1"
-    )->fetchColumn();
-
-    $codPendingPaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(cod_balance_paisa), 0) FROM cloud_online_orders WHERE delivery_status NOT IN ('DELIVERED', 'RETURNED', 'CANCELLED')"
-    )->fetchColumn();
-
-    $stockValuePaisa = (int)$pdo->query(
-        "SELECT COALESCE(SUM(current_stock_units * latest_batch_cost_paisa), 0) FROM cloud_finished_products WHERE is_active = 1 AND current_stock_units > 0"
-    )->fetchColumn();
-
-    $collected = (int)($salesRow['collected_sales_paisa'] ?? 0);
-    $cogs = (int)($salesRow['cogs_paisa'] ?? 0);
-    $netSales = $collected - $refundPaisa;
-    $grossProfit = $netSales - $cogs;
-    $netProfit = $grossProfit - $expPaisa - $salPaisa;
+    $branch = trim((string)($_GET['branch'] ?? 'ALL'));
+    $snap = ameer_build_live_dashboard_snapshot($pdo, $period, $branch);
+    $k = $snap['kpis'];
 
     ameer_json_response([
         'status' => 'OK',
-        'period' => $period,
-        'grossSalesPaisa' => (int)($salesRow['gross_sales_paisa'] ?? 0),
-        'discountsPaisa' => (int)($salesRow['discounts_paisa'] ?? 0),
-        'refundsPaisa' => $refundPaisa,
-        'netSalesPaisa' => $netSales,
-        'cogsPaisa' => $cogs,
-        'grossProfitPaisa' => $grossProfit,
-        'pettyExpensesPaisa' => $expPaisa,
-        'salariesPaisa' => $salPaisa,
-        'netProfitPaisa' => $netProfit,
-        'perfumeSalesPaisa' => (int)($salesRow['perfume_sales_paisa'] ?? 0),
-        'attarSalesPaisa' => (int)($salesRow['attar_sales_paisa'] ?? 0),
-        'testerSalesPaisa' => (int)($salesRow['tester_sales_paisa'] ?? 0),
-        'invoiceCount' => (int)($salesRow['invoice_count'] ?? 0),
-        'wholesaleReceivablePaisa' => $receivablePaisa,
-        'onlinePendingCodPaisa' => $codPendingPaisa,
-        'fgInventoryValuationPaisa' => $stockValuePaisa,
+        'period' => $snap['period'],
+        'branch' => $snap['branch'],
+        'syncCursor' => $snap['syncCursor'],
+        'grossSalesPaisa' => $k['totalGrossSalesPaisa'],
+        'discountsPaisa' => $k['totalDiscountsPaisa'],
+        'refundsPaisa' => $k['totalReturnsPaisa'],
+        'netSalesPaisa' => $k['totalNetRealizedPaisa'],
+        'cogsPaisa' => $k['cogsPaisa'],
+        'grossProfitPaisa' => $k['grossProfitPaisa'],
+        'pettyExpensesPaisa' => $k['pettyExpensesPaisa'],
+        'salariesPaisa' => $k['salariesPaisa'],
+        'netProfitPaisa' => $k['estNetProfitPaisa'],
+        'perfumeSalesPaisa' => $k['perfumeSalesPaisa'],
+        'attarSalesPaisa' => $k['attarSalesPaisa'],
+        'testerSalesPaisa' => $k['testerSalesPaisa'],
+        'invoiceCount' => $k['retailInvoicesCount'],
+        'wholesaleReceivablePaisa' => $k['wholesaleTotalLedgerUdarPaisa'],
+        'onlinePendingCodPaisa' => $k['onlinePendingCodPaisa'],
+        'fgInventoryValuationPaisa' => $k['fgCostValPaisa'],
+        'snapshot' => $snap,
         'serverTimestamp' => gmdate('c'),
     ]);
 }

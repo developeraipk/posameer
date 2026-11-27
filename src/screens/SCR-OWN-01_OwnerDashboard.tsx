@@ -40,21 +40,25 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ status: _status 
   const [selectedPeriod, setSelectedPeriod] = useState<"today" | "weekly" | "monthly" | "yearly">("today");
   const [discountPage, setDiscountPage] = useState(1);
 
-  const fetchDashboard = async (period: "today" | "weekly" | "monthly" | "yearly" = selectedPeriod) => {
-    setLoading(true);
+  const fetchDashboard = async (period: "today" | "weekly" | "monthly" | "yearly" = selectedPeriod, silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const data = await getExecutiveDashboard(period);
       setDashboard(data);
     } catch (err) {
-      console.error("Failed to load executive dashboard:", err);
+      if (!silent) console.error("Failed to load executive dashboard:", err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchDashboard(selectedPeriod);
-  }, []);
+    fetchDashboard(selectedPeriod, false);
+    const liveTimer = window.setInterval(() => {
+      fetchDashboard(selectedPeriod, true);
+    }, 4000);
+    return () => window.clearInterval(liveTimer);
+  }, [selectedPeriod]);
 
   useEffect(() => {
     const handleGlobalRefresh = () => {
@@ -118,6 +122,13 @@ export const OwnerDashboard: React.FC<OwnerDashboardProps> = ({ status: _status 
 
 
 
+          <span
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold tracking-wide select-none"
+            title="Auto-syncing live every 4 seconds without clicking Refresh"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            LIVE AUTO-SYNC
+          </span>
           <Button
             variant="secondary"
             size="sm"
