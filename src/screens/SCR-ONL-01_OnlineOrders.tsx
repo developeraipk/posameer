@@ -126,7 +126,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
   const [selectedPerfumeForTester, setSelectedPerfumeForTester] = useState<FinishedProduct | null>(null);
   const [testerPresetMl, setTesterPresetMl] = useState<1 | 2 | 3 | 5 | "CUSTOM">(1);
   const [customTesterMl, setCustomTesterMl] = useState<number>(1);
-  const [testerPriceRupees, setTesterPriceRupees] = useState<string>("0");
+  const [testerPriceRupees, setTesterPriceRupees] = useState<string>("");
   const [testerQty, setTesterQty] = useState<number>(1);
 
   // Return Items Selection State (For Partial/Full Returns)
@@ -363,7 +363,9 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
         alert(`"${p.name}" is currently Out of Stock (0 units remaining). Cannot be added to order!`);
         return;
       }
-      const existing = orderItems.find((it) => it.product_id === p.product_id);
+      const existing = orderItems.find(
+        (it) => it.item_type === "PERFUME" && !it.is_tester && it.product_id === p.product_id
+      );
       if (existing) {
         if (existing.quantity >= stock) {
           alert(`Cannot add more than available stock (${stock} units) for "${p.name}".`);
@@ -371,7 +373,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
         }
         setOrderItems(
           orderItems.map((it) =>
-            it.product_id === p.product_id
+            it.item_type === "PERFUME" && !it.is_tester && it.product_id === p.product_id
               ? {
                   ...it,
                   quantity: it.quantity + 1,
@@ -2140,7 +2142,7 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                             setSelectedPerfumeForTester(p);
                             setTesterPresetMl(1);
                             setCustomTesterMl(1);
-                            setTesterPriceRupees("0");
+                            setTesterPriceRupees("");
                             setTesterQty(1);
                           }}
                           className="p-2 rounded-lg border border-purple-200 dark:border-purple-900/50 bg-white dark:bg-slate-900 text-left hover:border-purple-500 transition-all cursor-pointer flex flex-col justify-between shadow-2xs group"
@@ -2346,15 +2348,20 @@ export const OnlineOrders: React.FC<OnlineOrdersProps> = ({ currentUser }) => {
                         <Input
                           type="number"
                           min="0"
+                          step="1"
                           value={testerPriceRupees}
-                          onChange={(e) => setTesterPriceRupees(e.target.value)}
+                          onFocus={(e) => e.currentTarget.select()}
+                          onChange={(e) => setTesterPriceRupees(e.target.value.replace(/^0+(?=\d)/, ""))}
                           placeholder="0"
                           className="h-7 text-xs font-mono font-bold text-purple-600"
                         />
                       </div>
                     </div>
 
-                    <div className="flex justify-end gap-2 pt-1">
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <span className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+                        ✓ Zero boxed perfume stock deduction
+                      </span>
                       <Button
                         type="button"
                         variant="primary"

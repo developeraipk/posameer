@@ -4127,6 +4127,8 @@ pub struct WholesaleInvoiceSummaryDto {
     pub invoice_date: String,
     pub order_source: String,
     pub salesperson_name: String,
+    pub subtotal_paisa: i64,
+    pub discount_paisa: i64,
     pub net_total_paisa: i64,
     pub paid_amount_paisa: i64,
     pub balance_due_paisa: i64,
@@ -4344,10 +4346,12 @@ impl DatabaseManager {
         let mut stmt = conn.prepare("
             SELECT wi.wholesale_invoice_id, wi.invoice_number, wi.customer_id, wc.business_name,
                    wi.invoice_date, wi.order_source, sp.full_name,
-                   wi.net_total_paisa, wi.paid_amount_paisa, wi.balance_due_paisa, wi.payment_status
+                   wi.subtotal_paisa, wi.discount_paisa, wi.net_total_paisa,
+                   wi.paid_amount_paisa, wi.balance_due_paisa, wi.payment_status
             FROM wholesale_invoices wi
             JOIN wholesale_customers wc ON wi.customer_id = wc.customer_id
             JOIN salespersons sp ON wi.salesperson_id = sp.salesperson_id
+            WHERE wi.is_voided = 0
             ORDER BY wi.invoice_date DESC, wi.created_at DESC;
         ").map_err(|e| e.to_string())?;
 
@@ -4360,10 +4364,12 @@ impl DatabaseManager {
                 invoice_date: r.get(4)?,
                 order_source: r.get(5)?,
                 salesperson_name: r.get(6)?,
-                net_total_paisa: r.get(7)?,
-                paid_amount_paisa: r.get(8)?,
-                balance_due_paisa: r.get(9)?,
-                payment_status: r.get(10)?,
+                subtotal_paisa: r.get(7)?,
+                discount_paisa: r.get(8)?,
+                net_total_paisa: r.get(9)?,
+                paid_amount_paisa: r.get(10)?,
+                balance_due_paisa: r.get(11)?,
+                payment_status: r.get(12)?,
             })
         }).map_err(|e| e.to_string())?;
 
@@ -4559,7 +4565,8 @@ impl DatabaseManager {
         ).map_err(|e| format!("Wholesale customer not found: {}", e))?;
 
         let subtotal_paisa: i64 = payload.items.iter().map(|it| it.quantity as i64 * it.agreed_wholesale_price_paisa).sum();
-        let net_total_paisa = subtotal_paisa - payload.discount_paisa;
+        let effective_discount_paisa = payload.discount_paisa.clamp(0, subtotal_paisa);
+        let net_total_paisa = (subtotal_paisa - effective_discount_paisa).max(0);
         let balance_due_paisa = net_total_paisa - payload.paid_amount_paisa;
 
         if cred_limit > 0 && (curr_bal + balance_due_paisa) > cred_limit {
@@ -4620,7 +4627,7 @@ impl DatabaseManager {
                 payload.order_source,
                 verified_salesperson_id,
                 subtotal_paisa,
-                payload.discount_paisa,
+                effective_discount_paisa,
                 net_total_paisa,
                 payload.paid_amount_paisa,
                 balance_due_paisa,
@@ -4785,7 +4792,7 @@ impl DatabaseManager {
             wholesale_invoice_id: inv_id,
             invoice_number: payload.invoice_number.clone(),
             subtotal_paisa,
-            discount_paisa: payload.discount_paisa,
+            discount_paisa: effective_discount_paisa,
             net_total_paisa,
             paid_amount_paisa: payload.paid_amount_paisa,
             balance_due_paisa,
@@ -7630,8 +7637,28 @@ impl DatabaseManager {
         let total_attar_ret_units = attar_ret_units + online_attar_ret_units;
         let total_tester_ret_units = tester_ret_units + online_tester_ret_units;
 
-        let final_perfume = (net_retail_perfume + raw_wholesale_perfume + online_perfume_sales - total_perfume_refunds).max(0);
-        let final_attar = (net_retail_attar + raw_wholesale_attar + online_attar_sales - total_attar_refunds).max(0);
+        let (ws_perfume_disc, ws_perfume_disc_u, ws_attar_disc, ws_attar_disc_u): (i64, i64, i64, i64) = conn.query_row(
+            &format!(
+                "SELECT
+                   COALESCE(SUM(CASE WHEN item_type = 'PERFUME' THEN
+                       CAST(ROUND(1.0 * COALESCE(wi.discount_paisa, 0) * wii.line_total_paisa / MAX(wi.subtotal_paisa, 1)) AS INTEGER)
+                   ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN item_type = 'PERFUME' AND COALESCE(wi.discount_paisa, 0) > 0 THEN wii.quantity ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN item_type = 'ATTAR' THEN
+                       CAST(ROUND(1.0 * COALESCE(wi.discount_paisa, 0) * wii.line_total_paisa / MAX(wi.subtotal_paisa, 1)) AS INTEGER)
+                   ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN item_type = 'ATTAR' AND COALESCE(wi.discount_paisa, 0) > 0 THEN wii.quantity ELSE 0 END), 0)
+                 FROM wholesale_invoice_items wii
+                 JOIN wholesale_invoices wi ON wii.wholesale_invoice_id = wi.wholesale_invoice_id
+                 WHERE wi.is_voided = 0 AND {};",
+                wi_cond_wi
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        ).unwrap_or((0, 0, 0, 0));
+
+        let final_perfume = (net_retail_perfume + (raw_wholesale_perfume - ws_perfume_disc).max(0) + online_perfume_sales - total_perfume_refunds).max(0);
+        let final_attar = (net_retail_attar + (raw_wholesale_attar - ws_attar_disc).max(0) + online_attar_sales - total_attar_refunds).max(0);
         let final_perfume_orders = retail_perfume_orders + wholesale_perfume_orders;
         let final_attar_orders = retail_attar_orders + wholesale_attar_orders;
         let final_perfume_units = (retail_perfume_units + wholesale_perfume_units + online_perfume_units - (perfume_clean_ret_units + online_perfume_ret_units)).max(0);
@@ -7735,26 +7762,6 @@ impl DatabaseManager {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
         ).unwrap_or((0, 0, 0, 0, 0, 0));
-
-        let (ws_perfume_disc, ws_perfume_disc_u, ws_attar_disc, ws_attar_disc_u): (i64, i64, i64, i64) = conn.query_row(
-            &format!(
-                "SELECT
-                   COALESCE(SUM(CASE WHEN item_type = 'PERFUME' THEN
-                       CAST(ROUND(1.0 * COALESCE(wi.discount_paisa, 0) * wii.line_total_paisa / MAX(wi.subtotal_paisa, 1)) AS INTEGER)
-                   ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN item_type = 'PERFUME' AND COALESCE(wi.discount_paisa, 0) > 0 THEN wii.quantity ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN item_type = 'ATTAR' THEN
-                       CAST(ROUND(1.0 * COALESCE(wi.discount_paisa, 0) * wii.line_total_paisa / MAX(wi.subtotal_paisa, 1)) AS INTEGER)
-                   ELSE 0 END), 0),
-                   COALESCE(SUM(CASE WHEN item_type = 'ATTAR' AND COALESCE(wi.discount_paisa, 0) > 0 THEN wii.quantity ELSE 0 END), 0)
-                 FROM wholesale_invoice_items wii
-                 JOIN wholesale_invoices wi ON wii.wholesale_invoice_id = wi.wholesale_invoice_id
-                 WHERE wi.is_voided = 0 AND {};",
-                wi_cond_wi
-            ),
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        ).unwrap_or((0, 0, 0, 0));
 
         let final_perfume_discount_paisa = ret_perfume_disc + ws_perfume_disc + online_perfume_disc;
         let final_perfume_discount_units = ret_perfume_disc_u + ws_perfume_disc_u + online_perfume_disc_u;
@@ -7870,7 +7877,7 @@ impl DatabaseManager {
             |r| r.get(0)
         ).unwrap_or(0);
 
-        let mtd_profit = retail_profit_period + wholesale_profit_period - period_special_discount - returned_profit_period;
+        let mtd_profit = retail_profit_period + wholesale_profit_period - period_special_discount - wholesale_discount - returned_profit_period;
 
         // 6. Hourly sales (filtered by period)
         let mut hr_stmt = conn.prepare(&format!("
@@ -8480,12 +8487,12 @@ impl DatabaseManager {
             }
         }
 
-        // Query wholesale invoices for the selected period (Order count, Total Invoiced Net Billed Paisa, Units)
+        // Query wholesale invoices for the selected period (Order count, Total Gross Invoiced Paisa before trade discount, Units)
         let (ws_orders, ws_rev): (i64, i64) = conn.query_row(
             &format!("
                 SELECT 
                     COUNT(*),
-                    COALESCE(SUM(net_total_paisa), 0)
+                    COALESCE(SUM(CASE WHEN subtotal_paisa > 0 THEN subtotal_paisa ELSE net_total_paisa + discount_paisa END), 0)
                 FROM wholesale_invoices wi
                 WHERE is_voided = 0 AND {};
             ", wi_cond_wi),
@@ -8567,7 +8574,7 @@ impl DatabaseManager {
             }
         }
 
-        // 12. Discount History & Audit (Retail POS + Online Orders / WhatsApp / Web)
+        // 12. Discount History & Audit (Retail POS + Online Orders + Wholesale B2B)
         let mut disc_stmt = conn.prepare(&format!("
             SELECT 
                 si.invoice_id,
@@ -8594,9 +8601,23 @@ impl DatabaseManager {
                 (oo.channel || ' Order') AS salesperson_name
             FROM online_orders oo
             WHERE oo.delivery_status != 'CANCELLED' AND oo.discount_paisa > 0 AND {}
+            UNION ALL
+            SELECT
+                wi.wholesale_invoice_id,
+                wi.invoice_number,
+                wi.invoice_date,
+                COALESCE(wc.business_name, 'Wholesale Client') AS customer_phone,
+                wi.subtotal_paisa AS gross_total_paisa,
+                wi.discount_paisa AS disc_paisa,
+                wi.net_total_paisa AS net_payable_paisa,
+                COALESCE(sp.full_name, 'Wholesale Desk') AS salesperson_name
+            FROM wholesale_invoices wi
+            LEFT JOIN wholesale_customers wc ON wi.customer_id = wc.customer_id
+            LEFT JOIN salespersons sp ON wi.salesperson_id = sp.salesperson_id
+            WHERE wi.is_voided = 0 AND wi.discount_paisa > 0 AND {}
             ORDER BY invoice_date DESC
             LIMIT 50;
-        ", inv_cond_no_alias, onl_cond)).map_err(|e| e.to_string())?;
+        ", inv_cond_no_alias, onl_cond, wi_cond_wi)).map_err(|e| e.to_string())?;
 
         let disc_rows = disc_stmt.query_map([], |r| {
             let sp_name: String = r.get(7)?;
@@ -10077,6 +10098,61 @@ impl DatabaseManager {
         Ok(list)
     }
 
+    fn is_online_item_tester(it: &serde_json::Value) -> bool {
+        if it.get("is_tester").and_then(|v| v.as_bool()).unwrap_or(false) {
+            return true;
+        }
+        let itype = it
+            .get("item_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_uppercase();
+        if itype == "TESTER" {
+            return true;
+        }
+        if itype == "ATTAR" {
+            return false;
+        }
+        let name = it
+            .get("name")
+            .or_else(|| it.get("product_name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        name.contains("tester") || name.contains("sample")
+    }
+
+    fn adjust_online_order_inventory(tx: &rusqlite::Transaction, items_json: &str, is_restock: bool) {
+        if let Ok(parsed_items) = serde_json::from_str::<Vec<serde_json::Value>>(items_json) {
+            for it in parsed_items {
+                if Self::is_online_item_tester(&it) {
+                    continue;
+                }
+                let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1).max(0);
+                if qty <= 0 {
+                    continue;
+                }
+                if let Some(pid) = it.get("product_id").and_then(|p| p.as_str()) {
+                    let sql = if is_restock {
+                        "UPDATE finished_products SET current_stock_units = current_stock_units + ? WHERE product_id = ?;"
+                    } else {
+                        "UPDATE finished_products SET current_stock_units = MAX(0, current_stock_units - ?) WHERE product_id = ?;"
+                    };
+                    let _ = tx.execute(sql, rusqlite::params![qty, pid]);
+                } else if let Some(aid) = it.get("attar_id").and_then(|a| a.as_str()) {
+                    let grams = it.get("grams").and_then(|g| g.as_f64()).unwrap_or(qty as f64 * 12.0).max(0.0);
+                    let sql = if is_restock {
+                        "UPDATE attar_products SET current_stock_grams = current_stock_grams + ? WHERE attar_id = ?;"
+                    } else {
+                        "UPDATE attar_products SET current_stock_grams = MAX(0, current_stock_grams - ?) WHERE attar_id = ?;"
+                    };
+                    let _ = tx.execute(sql, rusqlite::params![grams, aid]);
+                }
+            }
+        }
+    }
+
     pub fn create_online_order(&self, payload: &CreateOnlineOrderPayload) -> Result<OnlineOrderDto, String> {
         let mut conn = self.get_connection().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -10178,24 +10254,8 @@ impl DatabaseManager {
             ]);
         }
 
-        // Stock deduction for items
-        if let Ok(parsed_items) = serde_json::from_str::<Vec<serde_json::Value>>(&payload.items_json) {
-            for it in parsed_items {
-                let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
-                if let Some(pid) = it.get("product_id").and_then(|p| p.as_str()) {
-                    let _ = tx.execute(
-                        "UPDATE finished_products SET current_stock_units = MAX(0, current_stock_units - ?) WHERE product_id = ?;",
-                        rusqlite::params![qty, pid],
-                    );
-                } else if let Some(aid) = it.get("attar_id").and_then(|a| a.as_str()) {
-                    let grams = it.get("grams").and_then(|g| g.as_f64()).unwrap_or(qty as f64 * 12.0);
-                    let _ = tx.execute(
-                        "UPDATE attar_products SET current_stock_grams = MAX(0, current_stock_grams - ?) WHERE attar_id = ?;",
-                        rusqlite::params![grams, aid],
-                    );
-                }
-            }
-        }
+        // Stock deduction for items (Testers never cut boxed finished_products stock)
+        Self::adjust_online_order_inventory(&tx, &payload.items_json, false);
 
         Self::enqueue_entity_snapshot(&*tx, &Self::active_station_id(), "ONLINE_ORDER", &order_id, "INSERT");
 
@@ -10334,23 +10394,8 @@ impl DatabaseManager {
             ).map_err(|e| format!("Order not found: {}", e))?
         };
 
-        if let Ok(parsed_items) = serde_json::from_str::<Vec<serde_json::Value>>(&items_to_restock_json) {
-            for it in parsed_items {
-                let qty = it.get("quantity").and_then(|q| q.as_i64()).unwrap_or(1);
-                if let Some(pid) = it.get("product_id").and_then(|p| p.as_str()) {
-                    let _ = tx.execute(
-                        "UPDATE finished_products SET current_stock_units = current_stock_units + ? WHERE product_id = ?;",
-                        rusqlite::params![qty, pid],
-                    );
-                } else if let Some(aid) = it.get("attar_id").and_then(|a| a.as_str()) {
-                    let grams = it.get("grams").and_then(|g| g.as_f64()).unwrap_or(qty as f64 * 12.0);
-                    let _ = tx.execute(
-                        "UPDATE attar_products SET current_stock_grams = current_stock_grams + ? WHERE attar_id = ?;",
-                        rusqlite::params![grams, aid],
-                    );
-                }
-            }
-        }
+        // Restock non-tester returned items (Testers never cut boxed stock, so they never add phantom stock on return)
+        Self::adjust_online_order_inventory(&tx, &items_to_restock_json, true);
 
         let refund_amt = payload.refund_amount_paisa.unwrap_or(0);
         let deduct_amt = payload.deduction_amount_paisa.unwrap_or(0);

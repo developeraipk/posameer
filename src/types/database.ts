@@ -686,6 +686,8 @@ export interface WholesaleInvoiceSummary {
   invoice_date: string;
   order_source: string;
   salesperson_name: string;
+  subtotal_paisa?: number;
+  discount_paisa?: number;
   net_total_paisa: number;
   paid_amount_paisa: number;
   balance_due_paisa: number;

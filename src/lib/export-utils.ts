@@ -340,7 +340,12 @@ export function exportAllTablesToSingleCSV(
 
   const totalSalesUnits = sales.reduce((acc, s) => acc + s.total_units, 0);
   const totalSalesPaisa = sales.reduce((acc, s) => acc + s.net_payable_paisa, 0);
-  const totalDiscountsPaisa = sales.reduce((acc, s) => acc + (s.discount_paisa || 0), 0);
+  const totalRetailDiscountsPaisa = sales.reduce((acc, s) => acc + (s.discount_paisa || 0), 0);
+  const totalOnlineDiscountsPaisa = onlineOrders
+    .filter((o) => o.delivery_status !== "CANCELLED")
+    .reduce((acc, o) => acc + (o.discount_paisa || 0), 0);
+  const totalWholesaleDiscountsPaisa = wholesaleInvoices.reduce((acc, w) => acc + (w.discount_paisa || 0), 0);
+  const totalDiscountsPaisa = totalRetailDiscountsPaisa + totalOnlineDiscountsPaisa + totalWholesaleDiscountsPaisa;
   const totalPerfumeStock = products.reduce((acc, p) => acc + p.current_stock_units, 0);
   const totalPerfumeCostPaisa = products.reduce((acc, p) => acc + ((p.latest_batch_cost_paisa || 0) * p.current_stock_units), 0);
   const totalPerfumeRetailPaisa = products.reduce((acc, p) => acc + (p.retail_price_paisa * p.current_stock_units), 0);
@@ -578,16 +583,19 @@ export function exportAllTablesToSingleCSV(
     lines.push(escapeCsvField(`=== TABLE 7: WHOLESALE COMMERCIAL INVOICES & RECEIVABLES (${wholesaleInvoices.length} Records) ===`));
     const wholesaleHeaders = [
       "Invoice #", "Date & Time", "Customer Name", "Channel / Source", "Salesperson",
-      "Net Total (PKR)", "Paid Amount (PKR)", "Balance Due (Udar) (PKR)", "Payment Status"
+      "Gross Subtotal (PKR)", "Discount (PKR)", "Net Total (PKR)", "Paid Amount (PKR)", "Balance Due (Udar) (PKR)", "Payment Status"
     ];
     lines.push(wholesaleHeaders.map(escapeCsvField).join(","));
     wholesaleInvoices.forEach((w) => {
+      const grossPaisa = (w.subtotal_paisa && w.subtotal_paisa > 0) ? w.subtotal_paisa : (w.net_total_paisa + (w.discount_paisa || 0));
       lines.push([
         escapeCsvField(w.invoice_number),
         escapeCsvField(new Date(w.invoice_date).toLocaleString()),
         escapeCsvField(w.customer_name),
         escapeCsvField(w.order_source || "DIRECT"),
         escapeCsvField(w.salesperson_name || ""),
+        escapeCsvField((grossPaisa / 100).toFixed(2)),
+        escapeCsvField(((w.discount_paisa || 0) / 100).toFixed(2)),
         escapeCsvField((w.net_total_paisa / 100).toFixed(2)),
         escapeCsvField((w.paid_amount_paisa / 100).toFixed(2)),
         escapeCsvField((w.balance_due_paisa / 100).toFixed(2)),

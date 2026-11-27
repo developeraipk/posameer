@@ -312,8 +312,12 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
   const totalRetailBottlesSold = filteredSales.reduce((acc, s) => acc + s.total_units, 0);
 
   // Wholesale Metrics:
-  const totalWholesaleGrossPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.net_total_paisa, 0);
-  const totalWholesaleBilledPaisa = totalWholesaleGrossPaisa;
+  // Gross sales preserve original invoice subtotal BEFORE trade discounts; billed total is net_total_paisa
+  const totalWholesaleGrossPaisa = filteredWholesaleInvoices.reduce(
+    (acc, w) => acc + (w.subtotal_paisa && w.subtotal_paisa > 0 ? w.subtotal_paisa : w.net_total_paisa + (w.discount_paisa || 0)),
+    0
+  );
+  const totalWholesaleBilledPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.net_total_paisa, 0);
   const totalWholesalePaidPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.paid_amount_paisa, 0);
   const totalWholesaleUdarPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + w.balance_due_paisa, 0);
   const totalAllCustomersUdarPaisa = wholesaleCustomers.reduce((acc, c) => acc + (c.current_balance_paisa || 0), 0);
@@ -321,8 +325,8 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
     period === "ALL"
       ? Math.max(totalWholesaleUdarPaisa, totalAllCustomersUdarPaisa)
       : totalWholesaleUdarPaisa;
-  const totalWholesaleDiscountsPaisa = 0;
-  const totalWholesaleDiscountedCount = 0;
+  const totalWholesaleDiscountsPaisa = filteredWholesaleInvoices.reduce((acc, w) => acc + (w.discount_paisa || 0), 0);
+  const totalWholesaleDiscountedCount = filteredWholesaleInvoices.filter((w) => (w.discount_paisa || 0) > 0).length;
   const totalWholesaleUnits = filteredWholesaleInvoices.length;
 
   // Robust Gross calculation: Pure unadjusted items volume before any returns or deductions
@@ -726,6 +730,7 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
             <td style="padding: 4px 5px; text-align: center; font-family: monospace; font-size: 8px; font-weight: 700;">${w.order_source || "DIRECT"}</td>
             <td style="padding: 4px 5px; text-align: right; font-family: monospace; font-weight: 800; color: #0f172a; white-space: nowrap;">
               Rs. ${formatRs(w.net_total_paisa)}
+              ${(w.discount_paisa || 0) > 0 ? `<div style="font-size: 7.5px; color: #dc2626; font-weight: normal;">Disc: -Rs. ${formatRs(w.discount_paisa || 0)}</div>` : ""}
             </td>
             <td style="padding: 4px 5px; text-align: right; font-family: monospace; font-weight: 800; color: #166534; white-space: nowrap;">
               Rs. ${formatRs(w.paid_amount_paisa)}
@@ -2058,10 +2063,11 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
               variant="outline"
               size="sm"
               onClick={() => {
-                const header = "Invoice #,Customer,Date,Source,Salesperson,Net Total (PKR),Paid (PKR),Balance Due (Udar),Payment Status\n";
-                const rows = filteredWholesaleInvoices.map(w => 
-                  `"${w.invoice_number}","${w.customer_name}","${w.invoice_date}","${w.order_source}","${w.salesperson_name || ''}",${w.net_total_paisa/100},${w.paid_amount_paisa/100},${w.balance_due_paisa/100},"${w.payment_status}"`
-                ).join("\n");
+                const header = "Invoice #,Customer,Date,Source,Salesperson,Gross Subtotal (PKR),Discount (PKR),Net Total (PKR),Paid (PKR),Balance Due (Udar),Payment Status\n";
+                const rows = filteredWholesaleInvoices.map(w => {
+                  const gross = (w.subtotal_paisa && w.subtotal_paisa > 0) ? w.subtotal_paisa : (w.net_total_paisa + (w.discount_paisa || 0));
+                  return `"${w.invoice_number}","${w.customer_name}","${w.invoice_date}","${w.order_source}","${w.salesperson_name || ''}",${gross/100},${(w.discount_paisa || 0)/100},${w.net_total_paisa/100},${w.paid_amount_paisa/100},${w.balance_due_paisa/100},"${w.payment_status}"`;
+                }).join("\n");
                 const blob = new Blob([header + rows], { type: "text/csv;charset=utf-8;" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
@@ -2404,7 +2410,14 @@ export const Reports: React.FC<ReportsProps> = ({ currentUser }) => {
                     <td className="py-2.5 px-3 text-slate-500">{w.invoice_date}</td>
                     <td className="py-2.5 px-3 font-sans font-medium text-slate-900 dark:text-slate-100">{w.customer_name}</td>
                     <td className="py-2.5 px-3 text-slate-500 font-sans">{w.salesperson_name || "—"}</td>
-                    <td className="py-2.5 px-3 text-right font-bold text-slate-900 dark:text-slate-100">Rs. {formatRs(w.net_total_paisa)}</td>
+                    <td className="py-2.5 px-3 text-right font-bold text-slate-900 dark:text-slate-100">
+                      Rs. {formatRs(w.net_total_paisa)}
+                      {(w.discount_paisa || 0) > 0 && (
+                        <span className="block text-[10px] font-normal text-rose-500">
+                          Gross: Rs. {formatRs(w.subtotal_paisa && w.subtotal_paisa > 0 ? w.subtotal_paisa : w.net_total_paisa + (w.discount_paisa || 0))} | Disc: -Rs. {formatRs(w.discount_paisa || 0)}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2.5 px-3 text-right font-bold text-emerald-600 dark:text-emerald-400">Rs. {formatRs(w.paid_amount_paisa)}</td>
                     <td className="py-2.5 px-3 text-right font-bold">
                       {w.balance_due_paisa > 0 ? (
